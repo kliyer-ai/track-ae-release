@@ -5,9 +5,9 @@ import torch
 from jaxtyping import Float
 from torch import nn
 
+from model.blocks import InputMLP, Level, OutputMLP, TransformerLayer
 from model.dino import MinDino
 from model.rope import centers, make_axial_pos_2d
-from model.transformer import InputMLP, Level, OutputMLP, TransformerLayer
 
 
 def chunk_grid_strided(grid, chunk_size=8):

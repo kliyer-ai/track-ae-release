@@ -5,9 +5,9 @@ import torch
 from jaxtyping import Float
 from torch import nn
 
+from model.blocks import FeedForwardBlock, InputMLP, Level, RMSNorm, TransformerLayer
 from model.dino import MinDino
 from model.rope import centers, make_axial_pos_2d
-from model.transformer import FeedForwardBlock, InputMLP, Level, RMSNorm, TransformerLayer
 from model.vae import TrackVAE
 
 
