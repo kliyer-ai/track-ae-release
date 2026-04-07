@@ -1,15 +1,15 @@
 from dataclasses import dataclass
-from model.rope import make_axial_pos_2d
+from model.dino import MinDino
+from model.rope import centers, make_axial_pos_2d
 import torch
 from torch import nn
 from jaxtyping import Float
 import einops
 import torch
-from diffusion.model.modules.min_dinov2 import MinDino
-
-
 from functools import reduce
 import torch.nn.functional as F
+
+from model.transformer import InputMLP, Level, OutputMLP, TransformerLayer
 
 
 def chunk_grid_strided(grid, chunk_size=8):
@@ -41,9 +41,9 @@ def chunk_grid_strided(grid, chunk_size=8):
 
     B, H, W, C = grid.shape
 
-    assert (
-        H % chunk_size == 0 and W % chunk_size == 0
-    ), f"Grid dimensions ({H}, {W}) must be divisible by chunk_size ({chunk_size})"
+    assert H % chunk_size == 0 and W % chunk_size == 0, (
+        f"Grid dimensions ({H}, {W}) must be divisible by chunk_size ({chunk_size})"
+    )
 
     chunks_per_dim = H // chunk_size
 
@@ -88,9 +88,9 @@ def assemble_chunks_strided(chunks, grid_size: int):
 
     chunks_per_dim = grid_size // chunk_size
 
-    assert (
-        num_chunks == chunks_per_dim * chunks_per_dim
-    ), f"Number of chunks ({num_chunks}) should equal chunks_per_dim^2 ({chunks_per_dim}^2)"
+    assert num_chunks == chunks_per_dim * chunks_per_dim, (
+        f"Number of chunks ({num_chunks}) should equal chunks_per_dim^2 ({chunks_per_dim}^2)"
+    )
 
     # Reverse the rearrange operation
     grid = einops.rearrange(
@@ -125,7 +125,7 @@ def kl_divergence(mean: torch.Tensor, logvar: torch.Tensor) -> torch.Tensor:
 class Transformer(nn.Module):
     def __init__(self):
         super().__init__()
-        self.mid_level = Level([GenericCrossTransformerLayer() for _ in range(12)])
+        self.mid_level = Level([TransformerLayer() for _ in range(12)])
 
     def forward(
         self,
@@ -145,7 +145,6 @@ class EncoderOutput:
 
 
 class TrajRegressorDecoderMAE(nn.Module):
-
     # annotate the buffers
     pos_cross: Float[torch.Tensor, "1 n_patches 3"]
 
@@ -168,9 +167,7 @@ class TrajRegressorDecoderMAE(nn.Module):
 
         H, W = img_feat_size
         time_cross = 1
-        pos_cross = torch.cat(
-            [torch.full((H * W, 1), time_cross), make_axial_pos_2d(H, W)], dim=-1
-        )
+        pos_cross = torch.cat([torch.full((H * W, 1), time_cross), make_axial_pos_2d(H, W)], dim=-1)
         self.register_buffer("pos_cross", pos_cross)  # [1, n_tokens, 3]
 
     def convert_tracks(
@@ -201,9 +198,7 @@ class TrajRegressorDecoderMAE(nn.Module):
 
         target_fn = lambda x: x
 
-        return {
-            "reconstruction_loss": self.criterion(decoded_tracks, target_fn(tracks_yx))
-        }
+        return {"reconstruction_loss": self.criterion(decoded_tracks, target_fn(tracks_yx))}
 
     def get_decode_pos(
         self,
@@ -219,9 +214,7 @@ class TrajRegressorDecoderMAE(nn.Module):
         else:
             t_pos = torch.arange(0, points_per_traj, device=latents.device)
         t_pos = einops.repeat(t_pos, "T -> B (N T) C", B=B, N=num_trajs, C=1)
-        spatial_pos = einops.repeat(
-            query_pos, "B N C -> B (N T) C", T=points_per_traj
-        )  # B N*T 2
+        spatial_pos = einops.repeat(query_pos, "B N C -> B (N T) C", T=points_per_traj)  # B N*T 2
         pos = torch.cat([t_pos, spatial_pos], dim=-1)  # B ( n_emb + N*T ) 3
         return pos
 
@@ -257,20 +250,15 @@ class TrajRegressorDecoderMAE(nn.Module):
             pos_cross[..., 0] * traj_pos[..., 0].min()
         )  # first dim is time, smallest value is start time
         pos_cross = pos_cross.expand(B, -1, -1)  # [B (H W) 3]
-        decoded_tracks = self.backbone(
-            z, pos, x_cross=x_cross, pos_cross=pos_cross
-        )  # B (N T) C
+        decoded_tracks = self.backbone(z, pos, x_cross=x_cross, pos_cross=pos_cross)  # B (N T) C
 
         decoded_tracks = self.trajs_out(decoded_tracks[:, -N_decode_tokens:])
-        decoded_tracks = einops.rearrange(
-            decoded_tracks, "B (N T) C -> B N T C", N=num_trajs, T=points_per_traj
-        )
+        decoded_tracks = einops.rearrange(decoded_tracks, "B (N T) C -> B N T C", N=num_trajs, T=points_per_traj)
 
         return decoded_tracks
 
 
 class TrajEncoder(nn.Module):
-
     # annotate the buffers
     query_pos: Float[torch.Tensor, "1 n_latents 3"]
     reg_pos: Float[torch.Tensor, "1 1 3"]
@@ -300,9 +288,7 @@ class TrajEncoder(nn.Module):
             if isinstance(grid_size, int):
                 grid_size = (1, grid_size, grid_size)
 
-            self.query_token = nn.Parameter(
-                torch.randn(1, 1, model_dim)
-            )  # will be broadcasted in forward
+            self.query_token = nn.Parameter(torch.randn(1, 1, model_dim))  # will be broadcasted in forward
             query_time = centers(-1, 1, grid_size[0])
             query_pos = torch.cat(
                 # first is temporal pos, then spatial pos
@@ -325,9 +311,7 @@ class TrajEncoder(nn.Module):
                 dim=-1,
             )  # [n_latents, 3]
         else:
-            assert isinstance(
-                grid_size, int
-            ), "use_grid is False only supported for int grid_size"
+            assert isinstance(grid_size, int), "use_grid is False only supported for int grid_size"
             print("Using non-grid latent tokens in TrajEncoder", flush=True)
             # use 0 positions for queries since we don't have a grid
             self.query_token = nn.Parameter(torch.randn(1, grid_size, model_dim))
@@ -337,18 +321,12 @@ class TrajEncoder(nn.Module):
 
         # prepare cross attention pos encodings
         time_cross = 1.0
-        pos_cross = torch.cat(
-            [torch.full((H * W, 1), time_cross), make_axial_pos_2d(H, W)], dim=-1
-        )
+        pos_cross = torch.cat([torch.full((H * W, 1), time_cross), make_axial_pos_2d(H, W)], dim=-1)
         self.register_buffer("pos_cross", pos_cross)  # [H*W, 3]
 
         # VAE components
-        self.to_mean = nn.Linear(
-            model_dim, model_dim if latent_dim is None else latent_dim
-        )
-        self.to_logvar = nn.Linear(
-            model_dim, model_dim if latent_dim is None else latent_dim
-        )
+        self.to_mean = nn.Linear(model_dim, model_dim if latent_dim is None else latent_dim)
+        self.to_logvar = nn.Linear(model_dim, model_dim if latent_dim is None else latent_dim)
 
     # tracks are in [-1, 1]
     def forward(
@@ -375,15 +353,11 @@ class TrajEncoder(nn.Module):
         # create temporal positions
         t_pos = centers(-1, 1, T, device=tracks_yx.device)
         t_pos = einops.repeat(t_pos, "T -> B (N T) 1", B=B, N=N)
-        token_pos = torch.cat(
-            [t_pos, einops.repeat(start_pos_tracks, "B N C -> B (N T) C", T=T)], dim=-1
-        )
+        token_pos = torch.cat([t_pos, einops.repeat(start_pos_tracks, "B N C -> B (N T) C", T=T)], dim=-1)
         query_pos = self.query_pos.expand(B, -1, -1)
         reg_pos = self.reg_pos.expand(B, -1, -1)
 
-        tracks_embedded = torch.cat(
-            [query_tokens, tracks_embedded, reg_token], dim=1
-        )  # B (G*G + N*T) C
+        tracks_embedded = torch.cat([query_tokens, tracks_embedded, reg_token], dim=1)  # B (G*G + N*T) C
         pos = torch.cat([query_pos, token_pos, reg_pos], dim=1)
 
         # prepare Cross Attention
@@ -395,9 +369,7 @@ class TrajEncoder(nn.Module):
                 pos_cross[..., 0] * token_pos[..., 0].min()
             )  # first dim is time, smallest value is start time
             pos_cross = pos_cross.expand(B, -1, -1)  # [B (H W) 3]
-            latents = self.backbone(
-                tracks_embedded, pos, x_cross=x_cross, pos_cross=pos_cross
-            )  # B (N T) C
+            latents = self.backbone(tracks_embedded, pos, x_cross=x_cross, pos_cross=pos_cross)  # B (N T) C
         else:
             latents = self.backbone(tracks_embedded, pos)
 
@@ -432,9 +404,7 @@ class TrajectoryAE(nn.Module):
     ) -> Float[torch.Tensor, "B (H W) C"]:
         if start_emb is not None:
             return start_emb
-        assert (
-            start_frame is not None
-        ), "Either start_frame or start_emb must be provided"
+        assert start_frame is not None, "Either start_frame or start_emb must be provided"
         return self.img_embedder(start_frame)
 
     def encode(
@@ -483,12 +453,8 @@ class TrajectoryAE(nn.Module):
         chunk_size=8,
     ):
         B = latents.shape[0]
-        dense_query_grid = make_axial_pos_2d(
-            grid_size, grid_size, device=latents.device
-        )  # [h*w, d]
-        dense_query_grid = einops.repeat(
-            dense_query_grid, "(h w) d -> b h w d", b=B, h=grid_size, w=grid_size, d=2
-        )
+        dense_query_grid = make_axial_pos_2d(grid_size, grid_size, device=latents.device)  # [h*w, d]
+        dense_query_grid = einops.repeat(dense_query_grid, "(h w) d -> b h w d", b=B, h=grid_size, w=grid_size, d=2)
 
         # Chunk into strided 8x8 grids
         # this is 64 tokens. our decoder was trained on 80
@@ -497,24 +463,16 @@ class TrajectoryAE(nn.Module):
             dense_query_grid, chunk_size=chunk_size
         )  # (B, num_chunks, chunk_size, chunk_size, 2)
         num_chunks = chunks.shape[1]
-        assert (
-            num_chunks * chunk_size * chunk_size == grid_size * grid_size
-        ), f"Chunking error: {num_chunks} * {chunk_size} * {chunk_size} != {grid_size} * {grid_size}"
-        query_pos = einops.rearrange(
-            chunks, "B num_chunks h w d -> (B num_chunks) (h w) d"
-        )  # (B, 64, 2)
-
-        latents = einops.repeat(
-            latents, "B n_tokens C -> (B num_chunks) n_tokens C", num_chunks=num_chunks
+        assert num_chunks * chunk_size * chunk_size == grid_size * grid_size, (
+            f"Chunking error: {num_chunks} * {chunk_size} * {chunk_size} != {grid_size} * {grid_size}"
         )
+        query_pos = einops.rearrange(chunks, "B num_chunks h w d -> (B num_chunks) (h w) d")  # (B, 64, 2)
+
+        latents = einops.repeat(latents, "B n_tokens C -> (B num_chunks) n_tokens C", num_chunks=num_chunks)
         if start_frame is not None:
-            start_frame = einops.repeat(
-                start_frame, "B H W C -> (B num_chunks) H W C", num_chunks=num_chunks
-            )
+            start_frame = einops.repeat(start_frame, "B H W C -> (B num_chunks) H W C", num_chunks=num_chunks)
         if start_emb is not None:
-            start_emb = einops.repeat(
-                start_emb, "B n_emb C -> (B num_chunks) n_emb C", num_chunks=num_chunks
-            )
+            start_emb = einops.repeat(start_emb, "B n_emb C -> (B num_chunks) n_emb C", num_chunks=num_chunks)
 
         pred = self.decode(
             latents,
@@ -536,9 +494,7 @@ class TrajectoryAE(nn.Module):
 
         # Assemble back to full grid
 
-        reconstructed_grid = assemble_chunks_strided(
-            chunked_pred, grid_size
-        )  # (B*T, grid_height, grid_width, 2)
+        reconstructed_grid = assemble_chunks_strided(chunked_pred, grid_size)  # (B*T, grid_height, grid_width, 2)
 
         reconstructed_grid = einops.rearrange(
             reconstructed_grid, " (B T) H W c -> B H W T c", B=B, T=points_per_track
@@ -561,7 +517,6 @@ class TrajectoryAE(nn.Module):
         Float[torch.Tensor, "B n_tokens C"],
         Float[torch.Tensor, "B n_tokens C"],
     ]:
-
         B, N, T, C = tracks_enc_yx.shape
 
         start_emb = self._get_start_emb(start_frame=start_frame, start_emb=None)
@@ -582,9 +537,7 @@ class TrajectoryAE(nn.Module):
                 **decode_kwargs,
             )
         else:
-            assert (
-                tracks_dec_yx is not None
-            ), "tracks_dec_yx must be provided for non-dense decoding"
+            assert tracks_dec_yx is not None, "tracks_dec_yx must be provided for non-dense decoding"
             start_pos = tracks_dec_yx[:, :, 0, :]  # (B, N, 2)
             pred_tracks: Float[torch.Tensor, "B N T 2"] = self.decode(
                 latents,
@@ -614,9 +567,7 @@ class TrajectoryAE(nn.Module):
         std = torch.exp(0.5 * logvar)
 
         # Calculate reconstruction loss
-        reconstruction_loss_dict = self.decoder(
-            latents, tracks_dec_yx, latent_pos=latent_pos, start_emb=start_emb
-        )
+        reconstruction_loss_dict = self.decoder(latents, tracks_dec_yx, latent_pos=latent_pos, start_emb=start_emb)
 
         # Calculate KL divergence loss
         kl_loss = kl_divergence(mean, logvar).mean()  # Average over batch and tokens

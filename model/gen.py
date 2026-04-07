@@ -8,19 +8,19 @@ import torch.nn.functional as F
 from jaxtyping import Float
 from torch import nn
 
+from model.dino import MinDino
+from model.rope import centers, make_axial_pos_2d
+from model.transformer import FeedForwardBlock, InputMLP, Level, RMSNorm, TransformerLayer
+
 
 class CondTokenConcatMerge(nn.Module):
-    def __init__(
-        self, in_features: int, out_features: int, extra_token_features: int = 768
-    ):
+    def __init__(self, in_features: int, out_features: int, extra_token_features: int = 768):
         super().__init__()
         self.proj = nn.Linear(in_features, out_features, bias=False)
         self.extra_proj = nn.Linear(extra_token_features, out_features, bias=False)
 
     def forward(self, x, pos, extra_tokens, extra_pos, **kwargs):
-        return torch.cat(
-            (self.proj(x), self.extra_proj(extra_tokens)), dim=1
-        ), torch.cat((pos, extra_pos), dim=1)
+        return torch.cat((self.proj(x), self.extra_proj(extra_tokens)), dim=1), torch.cat((pos, extra_pos), dim=1)
 
 
 class CondTokenConcatSplit(nn.Module):
@@ -46,12 +46,10 @@ class Transformer(nn.Module):
         num_extra_tokens: int = 256,
     ):
         super().__init__()
-        self.mid_merge = CondTokenConcatMerge(
-            in_features, width, extra_token_features=extra_token_features
-        )
+        self.mid_merge = CondTokenConcatMerge(in_features, width, extra_token_features=extra_token_features)
         self.mid_level = Level(
             [
-                GenericCrossTransformerLayer(
+                TransformerLayer(
                     d_model=width,
                     d_cross=d_cross,
                     d_cond_norm=d_cond_norm,
@@ -59,9 +57,7 @@ class Transformer(nn.Module):
                 for _ in range(depth)
             ]
         )
-        self.mid_split = CondTokenConcatSplit(
-            width, out_features, num_extra_tokens=num_extra_tokens
-        )
+        self.mid_split = CondTokenConcatSplit(width, out_features, num_extra_tokens=num_extra_tokens)
 
     def forward(self, x, pos, **kwargs):
         x, pos = self.mid_merge(x, pos, **kwargs)
@@ -73,9 +69,7 @@ class MappingNetwork(nn.Module):
     def __init__(self, depth, width, d_ff, dropout=0.0):
         super().__init__()
         self.in_norm = RMSNorm(width)
-        self.blocks = nn.ModuleList(
-            [FeedForwardBlock(width, d_ff, dropout=dropout) for _ in range(depth)]
-        )
+        self.blocks = nn.ModuleList([FeedForwardBlock(width, d_ff, dropout=dropout) for _ in range(depth)])
         self.out_norm = RMSNorm(width)
 
     def forward(self, x):
@@ -89,51 +83,14 @@ class FourierFeatures(nn.Module):
     def __init__(self, in_features, out_features, std=1.0):
         super().__init__()
         assert out_features % 2 == 0
-        self.register_buffer(
-            "weight", torch.randn([out_features // 2, in_features]) * std
-        )
+        self.register_buffer("weight", torch.randn([out_features // 2, in_features]) * std)
 
     def forward(self, x):
         features = 2 * math.pi * x @ self.weight.T
         return torch.cat((features.cos(), features.sin()), dim=-1)
 
 
-def load_checkpoint_state_dict(checkpoint_path: str | Path) -> dict[str, torch.Tensor]:
-    checkpoint_path = Path(checkpoint_path)
-    if checkpoint_path.is_dir() and (checkpoint_path / "checkpoints").is_dir():
-        checkpoint_path = checkpoint_path / "checkpoints"
-
-    checkpoint_path = resolve_checkpoint_path(checkpoint_path)
-    assert checkpoint_path is not None
-
-    if checkpoint_path.is_file():
-        state_dict = torch.load(checkpoint_path, map_location="cpu")
-    else:
-        model_path = checkpoint_path / "model.pt"
-        inference_path = checkpoint_path / "inference.pt"
-        if model_path.exists():
-            state_dict = torch.load(model_path, map_location="cpu")
-        elif inference_path.exists():
-            state_dict = torch.load(inference_path, map_location="cpu")
-        else:
-            state_dict = convert_distributed_checkpoint(checkpoint_path)
-
-    if "model" in state_dict and isinstance(state_dict["model"], dict):
-        return state_dict["model"]
-    return state_dict
-
-
-def load_trajectory_ae(checkpoint_path: str | Path) -> TrajectoryAE:
-    model = TrajectoryAE()
-    state_dict = load_checkpoint_state_dict(checkpoint_path)
-    model.load_state_dict(state_dict)
-    model.requires_grad_(False)
-    return model
-
-
-def _broadcast_channel_stat(
-    stat: torch.Tensor | None, latents: torch.Tensor
-) -> torch.Tensor | None:
+def _broadcast_channel_stat(stat: torch.Tensor | None, latents: torch.Tensor) -> torch.Tensor | None:
     if stat is None:
         return None
     stat = stat.to(device=latents.device, dtype=torch.float64)
@@ -141,9 +98,7 @@ def _broadcast_channel_stat(
         return stat.view(1, 1, 1)
     if stat.ndim == 1:
         return stat.view(1, 1, -1)
-    raise ValueError(
-        f"Expected scalar or per-channel stat, got shape {tuple(stat.shape)}"
-    )
+    raise ValueError(f"Expected scalar or per-channel stat, got shape {tuple(stat.shape)}")
 
 
 class TrajRF(nn.Module):
@@ -169,12 +124,8 @@ class TrajRF(nn.Module):
         assert "ae_ckpt" in ae_ckpt_cfg, "ae_ckpt_cfg must contain an 'ae_ckpt' path"
 
         self.ae = load_trajectory_ae(ae_ckpt_cfg["ae_ckpt"])
-        self.img_embedder = MinDino(
-            "dinov2_vitb14_reg", out="features", requires_grad=False
-        )
-        self.track_cond_emb = InputMLP(
-            in_features=3, dim=768, random_fourier=True, theta=10.0 * math.pi
-        )
+        self.img_embedder = MinDino("dinov2_vitb14_reg", out="features", requires_grad=False)
+        self.track_cond_emb = InputMLP(in_features=3, dim=768, random_fourier=True, theta=10.0 * math.pi)
         self.time_emb = FourierFeatures(1, 256)
         self.time_in_proj = nn.Linear(256, 256, bias=False)
         self.mapping = MappingNetwork(depth=2, width=256, d_ff=768, dropout=0.0)
@@ -191,19 +142,13 @@ class TrajRF(nn.Module):
 
         mean = ae_ckpt_cfg.get("mean", None)
         var = ae_ckpt_cfg.get("var", None)
-        self.ae_shift = (
-            torch.tensor(mean, dtype=torch.float64) if mean is not None else None
-        )
-        self.ae_scale = (
-            torch.tensor(var, dtype=torch.float64) if var is not None else None
-        )
+        self.ae_shift = torch.tensor(mean, dtype=torch.float64) if mean is not None else None
+        self.ae_scale = torch.tensor(var, dtype=torch.float64) if var is not None else None
 
     def get_pos(self, x: Float[torch.Tensor, "b l c"]) -> Float[torch.Tensor, "b l 3"]:
         batch_size = x.shape[0]
         num_latent_tokens = self.grid_size[0] * self.grid_size[1] * self.grid_size[2]
-        assert (
-            x.shape[1] == num_latent_tokens
-        ), f"Expected {num_latent_tokens} latent tokens, got {x.shape[1]}"
+        assert x.shape[1] == num_latent_tokens, f"Expected {num_latent_tokens} latent tokens, got {x.shape[1]}"
 
         time_pos = einops.repeat(
             centers(-1, 1, self.grid_size[0], device=x.device),
@@ -221,9 +166,7 @@ class TrajRF(nn.Module):
         pos = torch.cat((time_pos, spatial_pos), dim=-1)
         return pos.unsqueeze(0).expand(batch_size, -1, -1)
 
-    def _time_condition(
-        self, t: Float[torch.Tensor, "b"]
-    ) -> Float[torch.Tensor, "b c"]:
+    def _time_condition(self, t: Float[torch.Tensor, "b"]) -> Float[torch.Tensor, "b c"]:
         time_features = self.time_emb(t[:, None])
         time_features = self.time_in_proj(time_features)
         return self.mapping(time_features)
@@ -232,9 +175,7 @@ class TrajRF(nn.Module):
         frame_embed = self.img_embedder(start_frame)
         batch_size, height, width, channels = frame_embed.shape
         frame_embed = einops.rearrange(frame_embed, "b h w c -> b (h w) c")
-        time_pos = centers(-1, 1, self.grid_size[0], device=frame_embed.device)[
-            time_idx
-        ].expand(height * width, 1)
+        time_pos = centers(-1, 1, self.grid_size[0], device=frame_embed.device)[time_idx].expand(height * width, 1)
         pos = torch.cat(
             (time_pos, make_axial_pos_2d(height, width, device=frame_embed.device)),
             dim=-1,
@@ -243,9 +184,7 @@ class TrajRF(nn.Module):
 
     def get_start_frame_embed(self, start_frame):
         frame_embed, frame_pos = self.get_frame_embed(start_frame, time_idx=0)
-        frame_embed = frame_embed + einops.rearrange(
-            self.learnable_emb_dino, "c -> 1 1 c"
-        )
+        frame_embed = frame_embed + einops.rearrange(self.learnable_emb_dino, "c -> 1 1 c")
         return frame_embed, frame_pos
 
     def get_static_conditioning(self, start_frame, track_conds):
@@ -259,22 +198,16 @@ class TrajRF(nn.Module):
 
         pos_cross = torch.cat(
             (
-                centers(-1, 1, self.grid_size[0], device=start_cond.device)[0].expand(
-                    batch_size, num_cond, 1
-                ),
+                centers(-1, 1, self.grid_size[0], device=start_cond.device)[0].expand(batch_size, num_cond, 1),
                 start_cond,
             ),
             dim=-1,
         )
 
         if self.training:
-            n_drop = torch.poisson(
-                torch.full((batch_size,), self.poisson_rate, device=start_cond.device)
-            )
+            n_drop = torch.poisson(torch.full((batch_size,), self.poisson_rate, device=start_cond.device))
             n_drop = n_drop.clamp(0, num_cond).long()
-            keep_mask = torch.arange(num_cond, device=start_cond.device)[None] < (
-                num_cond - n_drop[:, None]
-            )
+            keep_mask = torch.arange(num_cond, device=start_cond.device)[None] < (num_cond - n_drop[:, None])
             track_cond_emb = track_cond_emb * keep_mask[..., None]
             pos_cross = pos_cross * keep_mask[..., None]
 
@@ -305,33 +238,24 @@ class TrajRF(nn.Module):
 
     def get_track_cond(self, tracks: Float[torch.Tensor, "b n t 2"]):
         batch_size, num_tracks, num_points, _ = tracks.shape
-        assert (
-            self.n_cond <= num_tracks
-        ), "traj_gen_v2 samples endpoint conditions without replacement"
+        assert self.n_cond <= num_tracks, "traj_gen_v2 samples endpoint conditions without replacement"
 
         traj_idx = torch.stack(
-            [
-                torch.randperm(num_tracks, device=tracks.device)[: self.n_cond]
-                for _ in range(batch_size)
-            ]
+            [torch.randperm(num_tracks, device=tracks.device)[: self.n_cond] for _ in range(batch_size)]
         )
         batch_idx = einops.repeat(
             torch.arange(batch_size, device=tracks.device),
             "b -> b n_cond",
             n_cond=self.n_cond,
         )
-        end_t = torch.full(
-            (batch_size, self.n_cond), num_points - 1, device=tracks.device
-        )
+        end_t = torch.full((batch_size, self.n_cond), num_points - 1, device=tracks.device)
 
         start_points = tracks[batch_idx, traj_idx, 0]
         end_points = tracks[batch_idx, traj_idx, end_t]
         end_time = end_t.unsqueeze(-1).float() / (num_points - 1)
         return torch.cat((start_points, end_points, end_time), dim=-1), traj_idx
 
-    def normalize_latents(
-        self, latents: Float[torch.Tensor, "b l c"]
-    ) -> Float[torch.Tensor, "b l c"]:
+    def normalize_latents(self, latents: Float[torch.Tensor, "b l c"]) -> Float[torch.Tensor, "b l c"]:
         latents_fp64 = latents.to(torch.float64)
         ae_shift = _broadcast_channel_stat(self.ae_shift, latents_fp64)
         ae_scale = _broadcast_channel_stat(self.ae_scale, latents_fp64)
@@ -342,9 +266,7 @@ class TrajRF(nn.Module):
             latents_fp64 = latents_fp64 * (math.sqrt(0.5) / ae_scale.sqrt())
         return latents_fp64.to(latents.dtype)
 
-    def denormalize_latents(
-        self, latents: Float[torch.Tensor, "b l c"]
-    ) -> Float[torch.Tensor, "b l c"]:
+    def denormalize_latents(self, latents: Float[torch.Tensor, "b l c"]) -> Float[torch.Tensor, "b l c"]:
         latents_fp64 = latents.to(torch.float64)
         ae_shift = _broadcast_channel_stat(self.ae_shift, latents_fp64)
         ae_scale = _broadcast_channel_stat(self.ae_scale, latents_fp64)
@@ -362,16 +284,12 @@ class TrajRF(nn.Module):
 
     def _rf_loss(self, latents, start_frame, track_conds):
         batch_size = latents.shape[0]
-        t = torch.sigmoid(
-            torch.randn((batch_size,), device=latents.device, dtype=latents.dtype)
-        )
+        t = torch.sigmoid(torch.randn((batch_size,), device=latents.device, dtype=latents.dtype))
         t_expanded = t.view(batch_size, 1, 1)
         noise = torch.randn_like(latents)
         x_t = (1 - t_expanded) * latents + t_expanded * noise
 
-        static_cond = self.get_static_conditioning(
-            start_frame=start_frame, track_conds=track_conds
-        )
+        static_cond = self.get_static_conditioning(start_frame=start_frame, track_conds=track_conds)
         velocity = self._predict_velocity(x_t, t, static_cond)
         return ((noise - latents - velocity) ** 2).mean(dim=(1, 2))
 
@@ -399,24 +317,14 @@ class TrajRF(nn.Module):
         decode_latent: bool = True,
     ):
         batch_size = z.shape[0]
-        dt = torch.full(
-            (batch_size, 1, 1), 1.0 / sample_steps, device=z.device, dtype=z.dtype
-        )
+        dt = torch.full((batch_size, 1, 1), 1.0 / sample_steps, device=z.device, dtype=z.dtype)
 
-        static_cond = self.get_static_conditioning(
-            start_frame=start_frame, track_conds=track_conds
-        )
-        static_uncond = (
-            self.get_static_unconditioning(start_frame=start_frame)
-            if self.cfg_scale > 1.0
-            else None
-        )
+        static_cond = self.get_static_conditioning(start_frame=start_frame, track_conds=track_conds)
+        static_uncond = self.get_static_unconditioning(start_frame=start_frame) if self.cfg_scale > 1.0 else None
 
         latents = z
         for step in range(sample_steps, 0, -1):
-            t = torch.full(
-                (batch_size,), step / sample_steps, device=z.device, dtype=z.dtype
-            )
+            t = torch.full((batch_size,), step / sample_steps, device=z.device, dtype=z.dtype)
             cond_velocity = self._predict_velocity(latents, t, static_cond)
 
             if static_uncond is None:
@@ -424,9 +332,7 @@ class TrajRF(nn.Module):
                 continue
 
             uncond_velocity = self._predict_velocity(latents, t, static_uncond)
-            guided_velocity = uncond_velocity + self.cfg_scale * (
-                cond_velocity - uncond_velocity
-            )
+            guided_velocity = uncond_velocity + self.cfg_scale * (cond_velocity - uncond_velocity)
             latents = latents - dt * guided_velocity
 
         latents = self.denormalize_latents(latents)

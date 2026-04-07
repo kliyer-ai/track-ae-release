@@ -64,9 +64,7 @@ class Mlp(nn.Module):
 
 
 class SwiGLUFFN(nn.Module):
-    def __init__(
-        self, in_features, hidden_features=None, out_features=None, bias=True, **kwargs
-    ):
+    def __init__(self, in_features, hidden_features=None, out_features=None, bias=True, **kwargs):
         super().__init__()
         out_features = out_features or in_features
         hidden_features = hidden_features or in_features
@@ -87,9 +85,7 @@ class PatchEmbed(nn.Module):
         patch_size = to_2tuple(patch_size)
         self.grid_size = (img_size[0] // patch_size[0], img_size[1] // patch_size[1])
         self.num_patches = self.grid_size[0] * self.grid_size[1]
-        self.proj = nn.Conv2d(
-            in_chans, embed_dim, kernel_size=patch_size, stride=patch_size
-        )
+        self.proj = nn.Conv2d(in_chans, embed_dim, kernel_size=patch_size, stride=patch_size)
 
     def forward(self, x):
         x = self.proj(x).flatten(2).transpose(1, 2)
@@ -109,11 +105,7 @@ class Attention(nn.Module):
 
     def forward(self, x):
         B, N, C = x.shape
-        qkv = (
-            self.qkv(x)
-            .reshape(B, N, 3, self.num_heads, C // self.num_heads)
-            .permute(2, 0, 3, 1, 4)
-        )
+        qkv = self.qkv(x).reshape(B, N, 3, self.num_heads, C // self.num_heads).permute(2, 0, 3, 1, 4)
         q, k, v = qkv.unbind(0)
         x = F.scaled_dot_product_attention(q, k, v, scale=self.scale)
         x = x.transpose(1, 2).reshape(B, N, C)
@@ -218,9 +210,7 @@ class DinoVisionTransformer(nn.Module):
         self.cls_token = nn.Parameter(torch.zeros(1, 1, embed_dim))
         self.pos_embed = nn.Parameter(torch.zeros(1, 1370, embed_dim))
         self.register_tokens = (
-            nn.Parameter(torch.zeros(1, num_register_tokens, embed_dim))
-            if num_register_tokens
-            else None
+            nn.Parameter(torch.zeros(1, num_register_tokens, embed_dim)) if num_register_tokens else None
         )
 
         blocks_list = [
@@ -276,17 +266,13 @@ class DinoVisionTransformer(nn.Module):
             .permute(0, 2, 3, 1)
             .view(1, -1, dim)
         )
-        return torch.cat((class_pos_embed.unsqueeze(0), patch_pos_embed), dim=1).to(
-            x.dtype
-        )
+        return torch.cat((class_pos_embed.unsqueeze(0), patch_pos_embed), dim=1).to(x.dtype)
 
     def prepare_tokens_with_masks(self, x, masks=None):
         B, nc, w, h = x.shape
         x = self.patch_embed(x)
         if masks is not None:
-            x = torch.where(
-                masks.unsqueeze(-1), self.mask_token.to(x.dtype).unsqueeze(0), x
-            )
+            x = torch.where(masks.unsqueeze(-1), self.mask_token.to(x.dtype).unsqueeze(0), x)
         x = torch.cat((self.cls_token.expand(x.size(0), -1, -1), x), dim=1)
         x = x + self.interpolate_pos_encoding(x, w, h)
         if self.register_tokens is not None:
@@ -430,9 +416,7 @@ class MinDino(nn.Module):
             self.model: nn.Module = model_list[model_version](img_size=model_size)
             self.model.load_state_dict(dino.state_dict())
         else:
-            assert (
-                custom_model is not None
-            ), "Either model_version or custom_model must be provided"
+            assert custom_model is not None, "Either model_version or custom_model must be provided"
             self.model: nn.Module = DinoVisionTransformer(**custom_model)
 
         if requires_grad:
@@ -449,9 +433,7 @@ class MinDino(nn.Module):
         assert imgs.min() >= -1.01
         assert imgs.max() <= 1.01
         assert len(imgs.shape) == 4
-        assert (
-            imgs.size(-1) == 3
-        ), "Input images must be channel-last (B H W C) with 3 channels"
+        assert imgs.size(-1) == 3, "Input images must be channel-last (B H W C) with 3 channels"
 
         imgs = imgs.movedim(-1, 1)  # Move channel dimension to the front
 
@@ -459,12 +441,8 @@ class MinDino(nn.Module):
 
         imgs = (imgs + 1.0) / 2.0
         # copied from transformers preprocessor
-        imgs = imgs - torch.tensor(
-            [0.485, 0.456, 0.406], device=imgs.device, dtype=imgs.dtype
-        ).view(1, 3, 1, 1)
-        imgs = imgs / torch.tensor(
-            [0.229, 0.224, 0.225], device=imgs.device, dtype=imgs.dtype
-        ).view(1, 3, 1, 1)
+        imgs = imgs - torch.tensor([0.485, 0.456, 0.406], device=imgs.device, dtype=imgs.dtype).view(1, 3, 1, 1)
+        imgs = imgs / torch.tensor([0.229, 0.224, 0.225], device=imgs.device, dtype=imgs.dtype).view(1, 3, 1, 1)
 
         # is_training only results in getting the complete output (cls, features, regs)
         with torch.no_grad() if not self.requires_grad else contextlib.nullcontext():
@@ -486,9 +464,7 @@ class MinDino(nn.Module):
             return out_dict["x_norm_clstoken"].unsqueeze(1)  # [B 1 D]
         elif self.out == "both":
             # mostly for backward compatibility
-            return features, out_dict["x_norm_clstoken"].unsqueeze(
-                1
-            )  # [B H W D], [B 1 D]
+            return features, out_dict["x_norm_clstoken"].unsqueeze(1)  # [B H W D], [B 1 D]
         elif self.out == "regs":
             return out_dict["x_norm_regtokens"]  # [B 4 D]
         elif self.out == "dict":
@@ -498,7 +474,6 @@ class MinDino(nn.Module):
 
 
 if __name__ == "__main__":
-
     # this will test the similarity and l1 loss between the output of dino and our reimplementation
 
     for model_name, model_fn in model_list[3:]:

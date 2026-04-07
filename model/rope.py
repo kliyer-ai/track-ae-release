@@ -1,3 +1,4 @@
+from functools import reduce
 import math
 import torch
 from torch import nn
@@ -34,16 +35,16 @@ def bounding_box(h, w):
     return y_min, y_max, x_min, x_max
 
 
-def make_axial_pos_2d(h, w, dtype=None, device=None):
+def make_axial_pos_2d(h: int, w: int, dtype=None, device=None):
     y_min, y_max, x_min, x_max = bounding_box(h, w)
     h_pos = centers(y_min, y_max, h, dtype=dtype, device=device)
     w_pos = centers(x_min, x_max, w, dtype=dtype, device=device)
     return make_grid(h_pos, w_pos)
 
 
-def apply_rotary_emb(x, theta, conj=False):
+def apply_rotary_emb(x: torch.Tensor, theta: torch.Tensor, conj=False):
     out_dtype = x.dtype
-    dtype = einops.reduce(torch.promote_types, (x.dtype, theta.dtype, torch.float32))
+    dtype = reduce(torch.promote_types, (x.dtype, theta.dtype, torch.float32))
     d = theta.shape[-1]
     assert d * 2 <= x.shape[-1]
     x1, x2, x3 = x[..., :d], x[..., d : d * 2], x[..., d * 2 :]
@@ -83,9 +84,7 @@ class AxialRoPE3D(nn.Module):
             ]
             * 2
         )
-        self.yx_freqs = nn.Parameter(
-            yx_freqs.view(2, dim // 4, n_heads).mT.contiguous()
-        )
+        self.yx_freqs = nn.Parameter(yx_freqs.view(2, dim // 4, n_heads).mT.contiguous())
 
         t_freqs = torch.linspace(
             math.log(t_min_theta) if t_min_theta > 0 else 0.0,
