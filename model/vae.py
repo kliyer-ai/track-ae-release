@@ -1,14 +1,12 @@
 from dataclasses import dataclass
-from model.dino import MinDino
-from model.rope import centers, make_axial_pos_2d
-import torch
-from torch import nn
-from jaxtyping import Float
+
 import einops
 import torch
-from functools import reduce
-import torch.nn.functional as F
+from jaxtyping import Float
+from torch import nn
 
+from model.dino import MinDino
+from model.rope import centers, make_axial_pos_2d
 from model.transformer import InputMLP, Level, OutputMLP, TransformerLayer
 
 
@@ -122,21 +120,6 @@ def kl_divergence(mean: torch.Tensor, logvar: torch.Tensor) -> torch.Tensor:
     return -0.5 * torch.sum(1 + logvar - mean.pow(2) - logvar.exp(), dim=-1)
 
 
-class Transformer(nn.Module):
-    def __init__(self):
-        super().__init__()
-        self.mid_level = Level([TransformerLayer() for _ in range(12)])
-
-    def forward(
-        self,
-        x: Float[torch.Tensor, "B *DIMS C"],
-        pos: Float[torch.Tensor, "B *DIM cn"],
-        **kwargs,
-    ):
-        x = self.mid_level(x, pos=pos, **kwargs)
-        return x
-
-
 @dataclass(frozen=True)
 class EncoderOutput:
     mean: Float[torch.Tensor, "B n_tokens C"]
@@ -150,7 +133,9 @@ class TrajRegressorDecoderMAE(nn.Module):
 
     def __init__(
         self,
-        model_dim: int = 768,
+        d_model: int = 768,
+        d_cross: int = 768,
+        depth: int = 12,
         latent_dim: int = 16,
         img_feat_size=(16, 16),
         relative_time: bool = True,
@@ -158,10 +143,10 @@ class TrajRegressorDecoderMAE(nn.Module):
     ):
         super().__init__()
 
-        self.backbone = Transformer()
-        self.trajs_out = OutputMLP(model_dim, 2)
-        self.decode_token = nn.Parameter(torch.randn(1, 1, model_dim))
-        self.latents_in = nn.Linear(latent_dim, model_dim)
+        self.backbone = Level([TransformerLayer(d_model=d_model, d_cross=d_cross) for _ in range(depth)])
+        self.trajs_out = OutputMLP(d_model, 2)
+        self.decode_token = nn.Parameter(torch.randn(1, 1, d_model))
+        self.latents_in = nn.Linear(latent_dim, d_model)
         self.relative_time = relative_time
         self.criterion = criterion
 
@@ -266,7 +251,9 @@ class TrajEncoder(nn.Module):
 
     def __init__(
         self,
-        model_dim: int = 768,
+        d_model: int = 768,
+        d_cross: int = 768,
+        depth: int = 12,
         latent_dim: int = 16,
         grid_size: tuple[int, int, int] = (1, 16, 16),
         img_feat_size: tuple[int, int] = (16, 16),
@@ -274,12 +261,12 @@ class TrajEncoder(nn.Module):
     ):
         super().__init__()
 
-        self.backbone = Transformer()
+        self.backbone = Level([TransformerLayer(d_model=d_model, d_cross=d_cross) for _ in range(depth)])
         self.grid_size = grid_size
-        self.trajs_in = InputMLP(2, model_dim, random_fourier=True)
+        self.trajs_in = InputMLP(2, d_model, random_fourier=True)
         self.use_grid = use_grid
 
-        self.reg_token = nn.Parameter(torch.randn(1, 1, model_dim))
+        self.reg_token = nn.Parameter(torch.randn(1, 1, d_model))
         self.register_buffer("reg_pos", torch.zeros(1, 1, 3))  # [1, 1, 3]
 
         H, W = img_feat_size
@@ -288,7 +275,7 @@ class TrajEncoder(nn.Module):
             if isinstance(grid_size, int):
                 grid_size = (1, grid_size, grid_size)
 
-            self.query_token = nn.Parameter(torch.randn(1, 1, model_dim))  # will be broadcasted in forward
+            self.query_token = nn.Parameter(torch.randn(1, 1, d_model))  # will be broadcasted in forward
             query_time = centers(-1, 1, grid_size[0])
             query_pos = torch.cat(
                 # first is temporal pos, then spatial pos
@@ -314,7 +301,7 @@ class TrajEncoder(nn.Module):
             assert isinstance(grid_size, int), "use_grid is False only supported for int grid_size"
             print("Using non-grid latent tokens in TrajEncoder", flush=True)
             # use 0 positions for queries since we don't have a grid
-            self.query_token = nn.Parameter(torch.randn(1, grid_size, model_dim))
+            self.query_token = nn.Parameter(torch.randn(1, grid_size, d_model))
             query_pos = torch.zeros(grid_size, 3)  # [n_latents, 3]
 
         self.register_buffer("query_pos", query_pos[None])  # [1, n_latents, 3]
@@ -325,8 +312,8 @@ class TrajEncoder(nn.Module):
         self.register_buffer("pos_cross", pos_cross)  # [H*W, 3]
 
         # VAE components
-        self.to_mean = nn.Linear(model_dim, model_dim if latent_dim is None else latent_dim)
-        self.to_logvar = nn.Linear(model_dim, model_dim if latent_dim is None else latent_dim)
+        self.to_mean = nn.Linear(d_model, d_model if latent_dim is None else latent_dim)
+        self.to_logvar = nn.Linear(d_model, d_model if latent_dim is None else latent_dim)
 
     # tracks are in [-1, 1]
     def forward(

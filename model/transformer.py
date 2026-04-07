@@ -1,10 +1,11 @@
 import math
-import torch
-from torch import nn
-from jaxtyping import Float
-import einops
 from functools import reduce
+
+import einops
+import torch
 import torch.nn.functional as F
+from jaxtyping import Float
+from torch import nn
 
 from model.rope import AxialRoPE3D
 
@@ -74,31 +75,28 @@ class LinearSwiGLU(nn.Linear):
 
 
 class FeedForwardBlock(nn.Module):
-    def __init__(self, d_model, d_ff, cond_features=None, dropout=0.0):
+    def __init__(self, d_model, d_ff, cond_features=None):
         super().__init__()
         self.norm = AdaRMSNorm(d_model, cond_features) if cond_features is not None else RMSNorm(d_model)
         self.up_proj = LinearSwiGLU(d_model, d_ff, bias=False)
-        self.dropout = nn.Dropout(dropout)
         self.down_proj = zero_init(nn.Linear(d_ff, d_model, bias=False))
 
     def forward(self, x, cond_norm=None, **kwargs):
         skip = x
         x = self.norm(x, cond_norm) if cond_norm is not None else self.norm(x)
         x = self.up_proj(x)
-        x = self.dropout(x)
         x = self.down_proj(x)
         return x + skip
 
 
 class SelfAttentionBlock(nn.Module):
-    def __init__(self, d_model: int, d_cond_norm: int | None = None, d_head: int = 64, dropout: float = 0.0):
+    def __init__(self, d_model: int, d_cond_norm: int | None = None, d_head: int = 64):
         super().__init__()
         self.d_head = d_head
         self.n_heads = d_model // d_head
         self.norm = AdaRMSNorm(d_model, d_cond_norm) if d_cond_norm is not None else RMSNorm(d_model)
         self.qkv_proj = nn.Linear(d_model, d_model * 3, bias=False)
         self.scale = nn.Parameter(torch.full([self.n_heads], 10.0))
-        self.dropout = nn.Dropout(dropout)
         self.out_proj = zero_init(nn.Linear(d_model, d_model, bias=False))
         self.eps = 1e-6
         self.pos_emb = AxialRoPE3D(d_head, self.n_heads)
@@ -116,15 +114,12 @@ class SelfAttentionBlock(nn.Module):
 
         x = F.scaled_dot_product_attention(q, k, v, scale=1.0)
         x = einops.rearrange(x, "b nh l e -> b l (nh e)")
-        x = self.dropout(x)
         x = self.out_proj(x)
         return x + skip
 
 
 class CrossAttentionBlock(nn.Module):
-    def __init__(
-        self, d_model: int, d_cross: int, d_cond_norm: int | None = None, d_head: int = 64, dropout: float = 0.0
-    ):
+    def __init__(self, d_model: int, d_cross: int, d_cond_norm: int | None = None, d_head: int = 64):
         super().__init__()
         self.d_head = d_head
         self.n_heads = d_model // d_head
@@ -133,7 +128,6 @@ class CrossAttentionBlock(nn.Module):
         self.q_proj = nn.Linear(d_model, d_model, bias=False)
         self.kv_proj = nn.Linear(d_cross, d_model * 2, bias=False)
         self.scale = nn.Parameter(torch.full([self.n_heads], 10.0))
-        self.dropout = nn.Dropout(dropout)
         self.out_proj = zero_init(nn.Linear(d_model, d_model, bias=False))
         self.eps = 1e-6
         self.pos_emb = AxialRoPE3D(d_head, self.n_heads)
@@ -156,24 +150,17 @@ class CrossAttentionBlock(nn.Module):
 
         x = F.scaled_dot_product_attention(q, k, v, scale=1.0)
         x = einops.rearrange(x, "b nh l e -> b l (nh e)")
-        x = self.dropout(x)
         x = self.out_proj(x)
         return x + skip
 
 
 class TransformerLayer(nn.Module):
-    def __init__(self, d_model=1024, d_cross=768, d_cond_norm=256, d_head=64, dropout=0.0, ff_expand=3):
+    def __init__(self, d_model: int, d_cross: int, d_cond_norm: int | None = None, d_head=64, ff_expand=3):
         super().__init__()
         d_ff = d_model * ff_expand
-        self.self_attn = SelfAttentionBlock(d_model, d_cond_norm=d_cond_norm, d_head=d_head, dropout=dropout)
-        self.cross_attn = CrossAttentionBlock(
-            d_model,
-            d_cross=d_cross,
-            d_cond_norm=d_cond_norm,
-            d_head=d_head,
-            dropout=dropout,
-        )
-        self.ff = FeedForwardBlock(d_model, d_ff, cond_features=d_cond_norm, dropout=dropout)
+        self.self_attn = SelfAttentionBlock(d_model, d_cond_norm=d_cond_norm, d_head=d_head)
+        self.cross_attn = CrossAttentionBlock(d_model, d_cross=d_cross, d_cond_norm=d_cond_norm, d_head=d_head)
+        self.ff = FeedForwardBlock(d_model, d_ff, cond_features=d_cond_norm)
 
     def forward(self, x, pos, **kwargs):
         x = self.self_attn(x, pos, **kwargs)
@@ -220,11 +207,10 @@ class InputMLP(nn.Module):
         random_fourier: bool = False,
         random_fourier_paper: bool = False,
         theta=40.0 * math.pi,
-        dropout: float = 0.0,
     ):
         super().__init__()
         self.mlp = nn.Sequential(
-            *[FeedForwardBlock(dim, 3 * dim, dropout=dropout) for _ in range(depth)],
+            *[FeedForwardBlock(dim, 3 * dim) for _ in range(depth)],
         )
 
         if random_fourier:

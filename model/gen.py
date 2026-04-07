@@ -1,26 +1,24 @@
 import math
-from functools import reduce
-from pathlib import Path
 
 import einops
 import torch
-import torch.nn.functional as F
 from jaxtyping import Float
 from torch import nn
 
 from model.dino import MinDino
 from model.rope import centers, make_axial_pos_2d
 from model.transformer import FeedForwardBlock, InputMLP, Level, RMSNorm, TransformerLayer
+from model.vae import TrajectoryAE
 
 
 class CondTokenConcatMerge(nn.Module):
-    def __init__(self, in_features: int, out_features: int, extra_token_features: int = 768):
+    def __init__(self, in_features: int, out_features: int, cond_features: int = 768):
         super().__init__()
         self.proj = nn.Linear(in_features, out_features, bias=False)
-        self.extra_proj = nn.Linear(extra_token_features, out_features, bias=False)
+        self.cond_proj = nn.Linear(cond_features, out_features, bias=False)
 
     def forward(self, x, pos, extra_tokens, extra_pos, **kwargs):
-        return torch.cat((self.proj(x), self.extra_proj(extra_tokens)), dim=1), torch.cat((pos, extra_pos), dim=1)
+        return torch.cat((self.proj(x), self.cond_proj(extra_tokens)), dim=1), torch.cat((pos, extra_pos), dim=1)
 
 
 class CondTokenConcatSplit(nn.Module):
@@ -33,43 +31,11 @@ class CondTokenConcatSplit(nn.Module):
         return self.proj(x[:, : -self.num_extra_tokens])
 
 
-class Transformer(nn.Module):
-    def __init__(
-        self,
-        in_features: int = 16,
-        out_features: int = 16,
-        width: int = 1024,
-        depth: int = 24,
-        d_cross: int = 768,
-        d_cond_norm: int = 256,
-        extra_token_features: int = 768,
-        num_extra_tokens: int = 256,
-    ):
-        super().__init__()
-        self.mid_merge = CondTokenConcatMerge(in_features, width, extra_token_features=extra_token_features)
-        self.mid_level = Level(
-            [
-                TransformerLayer(
-                    d_model=width,
-                    d_cross=d_cross,
-                    d_cond_norm=d_cond_norm,
-                )
-                for _ in range(depth)
-            ]
-        )
-        self.mid_split = CondTokenConcatSplit(width, out_features, num_extra_tokens=num_extra_tokens)
-
-    def forward(self, x, pos, **kwargs):
-        x, pos = self.mid_merge(x, pos, **kwargs)
-        x = self.mid_level(x, pos=pos, **kwargs)
-        return self.mid_split(x)
-
-
 class MappingNetwork(nn.Module):
-    def __init__(self, depth, width, d_ff, dropout=0.0):
+    def __init__(self, depth, width, d_ff):
         super().__init__()
         self.in_norm = RMSNorm(width)
-        self.blocks = nn.ModuleList([FeedForwardBlock(width, d_ff, dropout=dropout) for _ in range(depth)])
+        self.blocks = nn.ModuleList([FeedForwardBlock(width, d_ff) for _ in range(depth)])
         self.out_norm = RMSNorm(width)
 
     def forward(self, x):
@@ -110,40 +76,62 @@ class TrajRF(nn.Module):
     - 1 x 16 x 16 latent grid with 16 latent channels
     - 24-layer 1024-dim transformer backbone
     - DINOv2-B/14 start-frame tokens
-    - 8 endpoint conditions with Poisson dropout during training
+    - 8 endpoint conditions with Poisson condition dropping during training
     """
 
     def __init__(
         self,
-        ae_ckpt_cfg: dict,
-        cfg_scale: float = 1.0,
+        ae: TrajectoryAE,
+        depth: int = 24,
+        width: int = 1024,
+        d_cross: int = 768,
+        d_cond_norm: int = 256,
         n_cond: int = 8,
         poisson_rate: float = 2.5,
     ):
         super().__init__()
-        assert "ae_ckpt" in ae_ckpt_cfg, "ae_ckpt_cfg must contain an 'ae_ckpt' path"
 
-        self.ae = load_trajectory_ae(ae_ckpt_cfg["ae_ckpt"])
-        self.img_embedder = MinDino("dinov2_vitb14_reg", out="features", requires_grad=False)
-        self.track_cond_emb = InputMLP(in_features=3, dim=768, random_fourier=True, theta=10.0 * math.pi)
-        self.time_emb = FourierFeatures(1, 256)
-        self.time_in_proj = nn.Linear(256, 256, bias=False)
-        self.mapping = MappingNetwork(depth=2, width=256, d_ff=768, dropout=0.0)
-        self.unet = Transformer()
+        self.ae = ae
 
-        self.learnable_emb_dino = nn.Parameter(torch.randn(768) * 0.02)
+        self.depth = depth
+        self.width = width
+        self.d_cross = d_cross
+        self.d_cond_norm = d_cond_norm
 
         self.grid_size = (1, 16, 16)
         self.latent_dim = 16
-        self.ca_dim = 768
         self.n_cond = n_cond
         self.poisson_rate = float(poisson_rate)
-        self.cfg_scale = float(cfg_scale)
+        self.cfg_scale = float(1)
 
-        mean = ae_ckpt_cfg.get("mean", None)
-        var = ae_ckpt_cfg.get("var", None)
-        self.ae_shift = torch.tensor(mean, dtype=torch.float64) if mean is not None else None
-        self.ae_scale = torch.tensor(var, dtype=torch.float64) if var is not None else None
+        self.img_embedder = MinDino("dinov2_vitb14_reg", out="features", requires_grad=False)
+        self.track_cond_emb = InputMLP(in_features=3, dim=d_cross, random_fourier=True, theta=10.0 * math.pi)
+        self.time_emb = FourierFeatures(1, 256)
+        self.time_in_proj = nn.Linear(256, 256, bias=False)
+        self.mapping = MappingNetwork(depth=2, width=256, d_ff=768)
+        self.in_proj = CondTokenConcatMerge(in_features=self.latent_dim, out_features=1024, cond_features=d_cross)
+
+        self.backbone = Level(
+            [
+                TransformerLayer(
+                    d_model=width,
+                    d_cross=d_cross,
+                    d_cond_norm=d_cond_norm,
+                )
+                for _ in range(depth)
+            ]
+        )
+
+        self.out_proj = CondTokenConcatSplit(
+            in_features=1024,
+            out_features=self.latent_dim,
+            num_extra_tokens=self.grid_size[1] * self.grid_size[2],
+        )
+
+        self.learnable_emb_dino = nn.Parameter(torch.randn(d_cross) * 0.02)
+
+        self.ae_shift = torch.tensor(mean, dtype=torch.float64)
+        self.ae_scale = torch.tensor(var, dtype=torch.float64)
 
     def get_pos(self, x: Float[torch.Tensor, "b l c"]) -> Float[torch.Tensor, "b l 3"]:
         batch_size = x.shape[0]
@@ -225,7 +213,9 @@ class TrajRF(nn.Module):
             "extra_tokens": start_embed,
             "extra_pos": start_pos,
             "x_cross": torch.zeros(
-                (batch_size, self.n_cond, self.ca_dim),
+                batch_size,
+                self.n_cond,
+                self.d_cross,
                 dtype=start_frame.dtype,
                 device=start_frame.device,
             ),
@@ -280,7 +270,9 @@ class TrajRF(nn.Module):
     def _predict_velocity(self, x_t, t, static_cond):
         cond_norm = self._time_condition(t.to(x_t.dtype))
         pos = self.get_pos(x_t)
-        return self.unet(x_t, pos=pos, cond_norm=cond_norm, **static_cond)
+        x_t, pos = self.in_proj(x_t, pos, **static_cond)
+        x_t = self.backbone(x_t, pos=pos, cond_norm=cond_norm, **static_cond)
+        return self.out_proj(x_t)
 
     def _rf_loss(self, latents, start_frame, track_conds):
         batch_size = latents.shape[0]
