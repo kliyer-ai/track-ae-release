@@ -101,9 +101,12 @@ class SelfAttentionBlock(nn.Module):
         self.eps = 1e-6
         self.pos_emb = AxialRoPE3D(d_head, self.n_heads)
 
-    def forward(self, x, pos, cond_norm, **kwargs):
+    def forward(self, x, pos, cond_norm=None, **kwargs):
         skip = x
-        x = self.norm(x, cond_norm)
+        if cond_norm is not None:
+            x = self.norm(x, cond_norm)
+        else:
+            x = self.norm(x)
         qkv = self.qkv_proj(x)
         q, k, v = einops.rearrange(qkv, "b l (t nh e) -> t b nh l e", t=3, e=self.d_head)
         q, k = scale_for_cosine_sim(q, k, self.scale[:, None, None], torch.tensor(self.eps, device=x.device))
@@ -132,9 +135,12 @@ class CrossAttentionBlock(nn.Module):
         self.eps = 1e-6
         self.pos_emb = AxialRoPE3D(d_head, self.n_heads)
 
-    def forward(self, x, pos, x_cross, pos_cross, cond_norm, **kwargs):
+    def forward(self, x, pos, x_cross, pos_cross, cond_norm=None, **kwargs):
         skip = x
-        x = self.norm(x, cond_norm)
+        if cond_norm is not None:
+            x = self.norm(x, cond_norm)
+        else:
+            x = self.norm(x)
         x_cross = self.norm_cross(x_cross)
 
         q = self.q_proj(x)

@@ -59,7 +59,7 @@ class FourierFeatures(nn.Module):
 def _broadcast_channel_stat(stat: torch.Tensor | None, latents: torch.Tensor) -> torch.Tensor | None:
     if stat is None:
         return None
-    stat = stat.to(device=latents.device, dtype=torch.float64)
+    stat = stat.to(device=latents.device)
     if stat.ndim == 0:
         return stat.view(1, 1, 1)
     if stat.ndim == 1:
