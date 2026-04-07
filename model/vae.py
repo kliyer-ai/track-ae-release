@@ -155,13 +155,6 @@ class TrajRegressorDecoderMAE(nn.Module):
         pos_cross = torch.cat([torch.full((H * W, 1), time_cross), make_axial_pos_2d(H, W)], dim=-1)
         self.register_buffer("pos_cross", pos_cross)  # [1, n_tokens, 3]
 
-    def convert_tracks(
-        self,
-        tracks_yx: Float[torch.Tensor, "B N T 2"],
-        query_pos: Float[torch.Tensor, "B N 2"],
-    ) -> Float[torch.Tensor, "B N T 2"]:
-        return tracks_yx
-
     def forward(
         self,
         latents: Float[torch.Tensor, "B n_tokens C"],
@@ -169,7 +162,7 @@ class TrajRegressorDecoderMAE(nn.Module):
         latent_pos: Float[torch.Tensor, "B n_tokens 3"],
         start_emb: Float[torch.Tensor, "B (H W) C"],
         **data_kwargs,
-    ) -> dict[str, Float[torch.Tensor, "B"]]:
+    ) -> Float[torch.Tensor, "B"]:
         B, num_trajs, points_per_traj, C = tracks_yx.shape
         start_pos = tracks_yx[:, :, 0, :]  # (B, N, 2)
         decoded_tracks = self.decode_tracks(
@@ -181,9 +174,7 @@ class TrajRegressorDecoderMAE(nn.Module):
             start_emb=start_emb,
         )
 
-        target_fn = lambda x: x
-
-        return {"reconstruction_loss": self.criterion(decoded_tracks, target_fn(tracks_yx))}
+        return self.criterion(decoded_tracks, tracks_yx)
 
     def get_decode_pos(
         self,
@@ -370,11 +361,11 @@ class TrajEncoder(nn.Module):
         return EncoderOutput(mean, logvar, query_pos)
 
 
-class TrajectoryAE(nn.Module):
+class TrackVAE(nn.Module):
     def __init__(
         self,
     ):
-        super(TrajectoryAE, self).__init__()
+        super(TrackVAE, self).__init__()
 
         self.encoder = TrajEncoder()
         self.decoder = TrajRegressorDecoderMAE()
@@ -426,7 +417,6 @@ class TrajectoryAE(nn.Module):
             latent_pos=latent_pos,
             start_emb=start_emb,
         )
-        pred_tracks = self.decoder.convert_tracks(pred_tracks, query_pos=query_pos)
 
         return pred_tracks
 
@@ -554,14 +544,13 @@ class TrajectoryAE(nn.Module):
         std = torch.exp(0.5 * logvar)
 
         # Calculate reconstruction loss
-        reconstruction_loss_dict = self.decoder(latents, tracks_dec_yx, latent_pos=latent_pos, start_emb=start_emb)
+        reconstruction_loss = self.decoder(latents, tracks_dec_yx, latent_pos=latent_pos, start_emb=start_emb)
 
         # Calculate KL divergence loss
         kl_loss = kl_divergence(mean, logvar).mean()  # Average over batch and tokens
 
         # Combine losses
-        loss_dict = reconstruction_loss_dict.copy()
-        loss_dict["kl_loss"] = kl_loss
+        loss_dict = dict(reconstruction_loss=reconstruction_loss, kl_loss=kl_loss)
 
         metrics = {
             "logvar_mean": logvar.mean(),

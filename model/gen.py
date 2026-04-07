@@ -8,7 +8,7 @@ from torch import nn
 from model.dino import MinDino
 from model.rope import centers, make_axial_pos_2d
 from model.transformer import FeedForwardBlock, InputMLP, Level, RMSNorm, TransformerLayer
-from model.vae import TrajectoryAE
+from model.vae import TrackVAE
 
 
 class CondTokenConcatMerge(nn.Module):
@@ -67,7 +67,7 @@ def _broadcast_channel_stat(stat: torch.Tensor | None, latents: torch.Tensor) ->
     raise ValueError(f"Expected scalar or per-channel stat, got shape {tuple(stat.shape)}")
 
 
-class TrajRF(nn.Module):
+class TrackFM(nn.Module):
     """
     Clean generator implementation for the released `traj_gen_v2` model.
 
@@ -81,17 +81,19 @@ class TrajRF(nn.Module):
 
     def __init__(
         self,
-        ae: TrajectoryAE,
+        vae: TrackVAE,
         depth: int = 24,
         width: int = 1024,
         d_cross: int = 768,
         d_cond_norm: int = 256,
+        vae_shift: float = -0.175,
+        vae_scale: float = 11.6,
         n_cond: int = 8,
         poisson_rate: float = 2.5,
     ):
         super().__init__()
 
-        self.ae = ae
+        self.vae = vae
 
         self.depth = depth
         self.width = width
@@ -130,8 +132,8 @@ class TrajRF(nn.Module):
 
         self.learnable_emb_dino = nn.Parameter(torch.randn(d_cross) * 0.02)
 
-        self.ae_shift = torch.tensor(mean, dtype=torch.float64)
-        self.ae_scale = torch.tensor(var, dtype=torch.float64)
+        self.vae_shift = torch.tensor(vae_shift)
+        self.vae_scale = torch.tensor(vae_scale)
 
     def get_pos(self, x: Float[torch.Tensor, "b l c"]) -> Float[torch.Tensor, "b l 3"]:
         batch_size = x.shape[0]
@@ -246,26 +248,24 @@ class TrajRF(nn.Module):
         return torch.cat((start_points, end_points, end_time), dim=-1), traj_idx
 
     def normalize_latents(self, latents: Float[torch.Tensor, "b l c"]) -> Float[torch.Tensor, "b l c"]:
-        latents_fp64 = latents.to(torch.float64)
-        ae_shift = _broadcast_channel_stat(self.ae_shift, latents_fp64)
-        ae_scale = _broadcast_channel_stat(self.ae_scale, latents_fp64)
+        vae_shift = _broadcast_channel_stat(self.vae_shift, latents)
+        vae_scale = _broadcast_channel_stat(self.vae_scale, latents)
 
-        if ae_shift is not None:
-            latents_fp64 = latents_fp64 - ae_shift
-        if ae_scale is not None:
-            latents_fp64 = latents_fp64 * (math.sqrt(0.5) / ae_scale.sqrt())
-        return latents_fp64.to(latents.dtype)
+        if vae_shift is not None:
+            latents = latents - vae_shift
+        if vae_scale is not None:
+            latents = latents * (math.sqrt(0.5) / vae_scale.sqrt())
+        return latents
 
     def denormalize_latents(self, latents: Float[torch.Tensor, "b l c"]) -> Float[torch.Tensor, "b l c"]:
-        latents_fp64 = latents.to(torch.float64)
-        ae_shift = _broadcast_channel_stat(self.ae_shift, latents_fp64)
-        ae_scale = _broadcast_channel_stat(self.ae_scale, latents_fp64)
+        vae_shift = _broadcast_channel_stat(self.vae_shift, latents)
+        vae_scale = _broadcast_channel_stat(self.vae_scale, latents)
 
-        if ae_scale is not None:
-            latents_fp64 = latents_fp64 * (ae_scale.sqrt() / math.sqrt(0.5))
-        if ae_shift is not None:
-            latents_fp64 = latents_fp64 + ae_shift
-        return latents_fp64.to(latents.dtype)
+        if vae_scale is not None:
+            latents = latents * (vae_scale.sqrt() / math.sqrt(0.5))
+        if vae_shift is not None:
+            latents = latents + vae_shift
+        return latents
 
     def _predict_velocity(self, x_t, t, static_cond):
         cond_norm = self._time_condition(t.to(x_t.dtype))
@@ -292,10 +292,12 @@ class TrajRF(nn.Module):
         **kwargs,
     ):
         with torch.no_grad():
-            encoded = self.ae.encode(tracks_enc_yx, start_frame=start_frame)
+            encoded = self.vae.encode(tracks_enc_yx, start_frame=start_frame)
             latents = self.normalize_latents(encoded.mean)
             track_conds, _ = self.get_track_cond(tracks_enc_yx)
-        return self._rf_loss(latents, start_frame=start_frame, track_conds=track_conds)
+
+        rf_loss = self._rf_loss(latents, start_frame=start_frame, track_conds=track_conds)
+        return dict(rf_loss=rf_loss), dict()
 
     @torch.no_grad()
     def sample(
@@ -331,7 +333,7 @@ class TrajRF(nn.Module):
         if not decode_latent:
             return latents
 
-        return self.ae.decode(
+        return self.vae.decode(
             latents=latents,
             query_pos=query_pos,
             points_per_track=points_per_traj,
