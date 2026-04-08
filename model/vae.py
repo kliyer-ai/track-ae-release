@@ -364,6 +364,8 @@ class TrajEncoder(nn.Module):
 class TrackVAE(nn.Module):
     def __init__(
         self,
+        kl_weight: float = 1e-7,
+        unlock_img_embedder: bool = False,
     ):
         super(TrackVAE, self).__init__()
 
@@ -373,7 +375,9 @@ class TrackVAE(nn.Module):
             "dinov2_vitb14_reg",
             reshape=False,
             out="features",
+            requires_grad=unlock_img_embedder,
         )
+        self.kl_weight = kl_weight
 
     def _get_start_emb(
         self,
@@ -547,7 +551,7 @@ class TrackVAE(nn.Module):
         reconstruction_loss = self.decoder(latents, tracks_dec_yx, latent_pos=latent_pos, start_emb=start_emb)
 
         # Calculate KL divergence loss
-        kl_loss = kl_divergence(mean, logvar).mean()  # Average over batch and tokens
+        kl_loss = self.kl_weight * kl_divergence(mean, logvar).mean()
 
         # Combine losses
         loss_dict = dict(reconstruction_loss=reconstruction_loss, kl_loss=kl_loss)

@@ -4,6 +4,7 @@ import einops
 import torch
 from jaxtyping import Float
 from torch import nn
+from tqdm import trange
 
 from model.blocks import FeedForwardBlock, InputMLP, Level, RMSNorm, TransformerLayer
 from model.dino import MinDino
@@ -309,6 +310,7 @@ class TrackFM(nn.Module):
         start_frame: Float[torch.Tensor, "b h w c"],
         sample_steps: int = 50,
         decode_latent: bool = True,
+        decode_dense: bool = False,
     ):
         batch_size = z.shape[0]
         dt = torch.full((batch_size, 1, 1), 1.0 / sample_steps, device=z.device, dtype=z.dtype)
@@ -317,7 +319,7 @@ class TrackFM(nn.Module):
         static_uncond = self.get_static_unconditioning(start_frame=start_frame) if self.cfg_scale > 1.0 else None
 
         latents = z
-        for step in range(sample_steps, 0, -1):
+        for step in trange(sample_steps, 0, -1, desc="Sampling"):
             t = torch.full((batch_size,), step / sample_steps, device=z.device, dtype=z.dtype)
             cond_velocity = self._predict_velocity(latents, t, static_cond)
 
@@ -333,6 +335,14 @@ class TrackFM(nn.Module):
             return latents
 
         latents = self.denormalize_latents(latents)
+
+        if decode_dense:
+            return self.vae.decode_dense(
+                latents=latents,
+                points_per_track=points_per_traj,
+                start_frame=start_frame,
+            )
+
         return self.vae.decode(
             latents=latents,
             query_pos=query_pos,
