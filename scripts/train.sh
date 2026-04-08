@@ -11,5 +11,5 @@ conda activate pytorch2.8_cu128
 
 . ./scripts/setup.sh
 
-launch --compile
+launch --compile --unlock_img_embedder
 # launch run_name=test-fsdp experiment=fm_img gc_freq=1000 val_freq=1000 distributed.dp_shard=$SLURM_GPUS_ON_NODE

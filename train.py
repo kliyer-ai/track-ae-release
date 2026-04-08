@@ -34,9 +34,11 @@ def train(
     # Data
     train_data_tar_base: str = "/export/group/datasets/koala-tapnext-subset",
     # Training
-    local_batch_size: int = 4,
+    local_batch_size: int = 16,
     lr: float = 1e-4,
     clip_grad_norm: float = 1.0,
+    precision: torch.dtype = torch.bfloat16,
+    unlock_img_embedder: bool = False,
     # Misc
     compile: bool = False,
     enable_wandb: bool = True,
@@ -109,7 +111,7 @@ def train(
 
     # Important setup stuff
     # If you want to change anything about what you train, you'll likely want to do it here and add it as a parameter to train()
-    model: TrackVAE = TrackVAE().to(device)
+    model: TrackVAE = TrackVAE(unlock_img_embedder=unlock_img_embedder).to(device)
     data = TrackerDataModule(train=dict(shards=[train_data_tar_base], batch_size=local_batch_size, num_workers=16))
     optimizer = torch.optim.AdamW(model.parameters(), lr=lr, betas=(0.9, 0.99), fused=compile)
     scheduler = torch.optim.lr_scheduler.SequentialLR(
@@ -137,7 +139,7 @@ def train(
 
     # Compile if requested
     if compile:
-        model = torch.compile(model)
+        model = torch.compile(model, fullgraph=True, mode="reduce-overhead")
         rank0logger.info("Model compiled with torch.compile.")
 
     barrier()
@@ -153,8 +155,9 @@ def train(
         try:
             optimizer.zero_grad()
             batch = {k: v.to(device, non_blocking=True) if torch.is_tensor(v) else v for k, v in batch.items()}
-            loss_dict, metrics = model(**batch)
-            loss = sum(loss_dict.values())
+            with torch.autocast(device_type, dtype=precision):
+                loss_dict, metrics = model(**batch)
+                loss = sum(loss_dict.values())
             loss.backward()
             grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), clip_grad_norm)
             optimizer.step()
