@@ -1,5 +1,6 @@
 import math
 from functools import reduce
+from typing import Literal
 
 import einops
 import torch
@@ -7,7 +8,7 @@ import torch.nn.functional as F
 from jaxtyping import Float
 from torch import nn
 
-from model.rope import AxialRoPE3D
+from model.rope import AxialRoPE1D, AxialRoPE2D, AxialRoPE3D
 
 
 def zero_init(layer):
@@ -90,16 +91,30 @@ class FeedForwardBlock(nn.Module):
 
 
 class SelfAttentionBlock(nn.Module):
-    def __init__(self, d_model: int, d_cond_norm: int | None = None, d_head: int = 64):
+    def __init__(
+        self,
+        d_model: int,
+        d_cond_norm: int | None = None,
+        d_head: int = 64,
+        rope_mode: Literal["1d", "2d", "3d"] = "3d",
+    ):
         super().__init__()
         self.d_head = d_head
         self.n_heads = d_model // d_head
+        self.rope_mode = rope_mode
         self.norm = AdaRMSNorm(d_model, d_cond_norm) if d_cond_norm is not None else RMSNorm(d_model)
         self.qkv_proj = nn.Linear(d_model, d_model * 3, bias=False)
         self.scale = nn.Parameter(torch.full([self.n_heads], 10.0))
         self.out_proj = zero_init(nn.Linear(d_model, d_model, bias=False))
         self.eps = 1e-6
-        self.pos_emb = AxialRoPE3D(d_head, self.n_heads)
+        if rope_mode == "3d":
+            self.pos_emb = AxialRoPE3D(d_head, self.n_heads)
+        elif rope_mode == "2d":
+            self.pos_emb = AxialRoPE2D(d_head, self.n_heads)
+        elif rope_mode == "1d":
+            self.pos_emb = AxialRoPE1D(d_head, self.n_heads)
+        else:
+            raise ValueError(f"Unknown rope_mode for SelfAttentionBlock: {rope_mode}")
 
     def forward(self, x, pos, cond_norm=None, **kwargs):
         skip = x
@@ -122,10 +137,18 @@ class SelfAttentionBlock(nn.Module):
 
 
 class CrossAttentionBlock(nn.Module):
-    def __init__(self, d_model: int, d_cross: int, d_cond_norm: int | None = None, d_head: int = 64):
+    def __init__(
+        self,
+        d_model: int,
+        d_cross: int,
+        d_cond_norm: int | None = None,
+        d_head: int = 64,
+        rope_mode: Literal["none", "1d", "2d", "3d"] = "3d",
+    ):
         super().__init__()
         self.d_head = d_head
         self.n_heads = d_model // d_head
+        self.rope_mode = rope_mode
         self.norm = AdaRMSNorm(d_model, d_cond_norm) if d_cond_norm is not None else RMSNorm(d_model)
         self.norm_cross = RMSNorm(d_cross)
         self.q_proj = nn.Linear(d_model, d_model, bias=False)
@@ -133,7 +156,16 @@ class CrossAttentionBlock(nn.Module):
         self.scale = nn.Parameter(torch.full([self.n_heads], 10.0))
         self.out_proj = zero_init(nn.Linear(d_model, d_model, bias=False))
         self.eps = 1e-6
-        self.pos_emb = AxialRoPE3D(d_head, self.n_heads)
+        if rope_mode == "3d":
+            self.pos_emb = AxialRoPE3D(d_head, self.n_heads)
+        elif rope_mode == "2d":
+            self.pos_emb = AxialRoPE2D(d_head, self.n_heads)
+        elif rope_mode == "1d":
+            self.pos_emb = AxialRoPE1D(d_head, self.n_heads)
+        elif rope_mode == "none":
+            self.pos_emb = None
+        else:
+            raise ValueError(f"Unknown rope_mode for CrossAttentionBlock: {rope_mode}")
 
     def forward(self, x, pos, x_cross, pos_cross, cond_norm=None, **kwargs):
         skip = x
@@ -149,10 +181,11 @@ class CrossAttentionBlock(nn.Module):
         k, v = einops.rearrange(kv, "b l (t nh e) -> t b nh l e", t=2, e=self.d_head)
         q, k = scale_for_cosine_sim(q, k, self.scale[:, None, None], torch.tensor(self.eps, device=x.device))
 
-        theta = self.pos_emb(pos.to(q.dtype)).movedim(-2, -3)
-        theta_cross = self.pos_emb(pos_cross.to(q.dtype)).movedim(-2, -3)
-        q = self.pos_emb.apply_emb(q, theta)
-        k = self.pos_emb.apply_emb(k, theta_cross)
+        if self.pos_emb is not None:
+            theta = self.pos_emb(pos.to(q.dtype)).movedim(-2, -3)
+            theta_cross = self.pos_emb(pos_cross.to(q.dtype)).movedim(-2, -3)
+            q = self.pos_emb.apply_emb(q, theta)
+            k = self.pos_emb.apply_emb(k, theta_cross)
 
         x = F.scaled_dot_product_attention(q, k, v, scale=1.0)
         x = einops.rearrange(x, "b nh l e -> b l (nh e)")
@@ -161,16 +194,47 @@ class CrossAttentionBlock(nn.Module):
 
 
 class TransformerLayer(nn.Module):
-    def __init__(self, d_model: int, d_cross: int, d_cond_norm: int | None = None, d_head=64, ff_expand=3):
+    def __init__(
+        self,
+        d_model: int,
+        d_cross: int | None = None,
+        d_cond_norm: int | None = None,
+        d_head=64,
+        ff_expand=3,
+        self_rope_mode: Literal["1d", "2d", "3d"] = "3d",
+        cross_rope_mode: Literal["none", "1d", "2d", "3d"] | None = None,
+        use_ca: bool = True,
+    ):
         super().__init__()
+        if cross_rope_mode is None:
+            cross_rope_mode = self_rope_mode
+
         d_ff = d_model * ff_expand
-        self.self_attn = SelfAttentionBlock(d_model, d_cond_norm=d_cond_norm, d_head=d_head)
-        self.cross_attn = CrossAttentionBlock(d_model, d_cross=d_cross, d_cond_norm=d_cond_norm, d_head=d_head)
+        self.use_ca = use_ca
+        self.self_attn = SelfAttentionBlock(
+            d_model,
+            d_cond_norm=d_cond_norm,
+            d_head=d_head,
+            rope_mode=self_rope_mode,
+        )
+        if self.use_ca:
+            if d_cross is None:
+                raise ValueError("d_cross must be provided when use_ca=True.")
+            self.cross_attn = CrossAttentionBlock(
+                d_model,
+                d_cross=d_cross,
+                d_cond_norm=d_cond_norm,
+                d_head=d_head,
+                rope_mode=cross_rope_mode,
+            )
+        else:
+            self.cross_attn = None
         self.ff = FeedForwardBlock(d_model, d_ff, cond_features=d_cond_norm)
 
     def forward(self, x, pos, **kwargs):
         x = self.self_attn(x, pos, **kwargs)
-        x = self.cross_attn(x, pos, **kwargs)
+        if self.cross_attn is not None:
+            x = self.cross_attn(x, pos, **kwargs)
         x = self.ff(x, **kwargs)
         return x
 
@@ -200,6 +264,24 @@ class CondTokenConcatSplit(nn.Module):
 
     def forward(self, x, **kwargs):
         return self.proj(x[:, : -self.num_extra_tokens])
+
+
+class SimpleProjIn(nn.Module):
+    def __init__(self, in_features, out_features):
+        super().__init__()
+        self.proj = nn.Linear(in_features, out_features, bias=False)
+
+    def forward(self, x, pos, **kwargs):
+        return self.proj(x), pos
+
+
+class SimpleProj(nn.Module):
+    def __init__(self, in_features, out_features):
+        super().__init__()
+        self.proj = nn.Linear(in_features, out_features, bias=False)
+
+    def forward(self, x, *args, **kwargs):
+        return self.proj(x)
 
 
 class InputMLP(nn.Module):

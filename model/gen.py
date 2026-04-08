@@ -329,13 +329,350 @@ class TrackFM(nn.Module):
             guided_velocity = uncond_velocity + self.cfg_scale * (cond_velocity - uncond_velocity)
             latents = latents - dt * guided_velocity
 
-        latents = self.denormalize_latents(latents)
         if not decode_latent:
             return latents
 
+        latents = self.denormalize_latents(latents)
         return self.vae.decode(
             latents=latents,
             query_pos=query_pos,
             points_per_track=points_per_traj,
             start_frame=start_frame,
         )
+
+
+class TrackFMLibero(TrackFM):
+    def __init__(
+        self,
+        vae: TrackVAE,
+        num_views: int = 2,
+        text_enc_dim: int = 768,
+        use_t_input: bool = False,
+        c_dropout: float = 0.1,
+        c_dropout_start_frame: float = 0.0,
+        text_enc_depth: int = 6,
+        **kwargs,
+    ):
+        super().__init__(vae=vae, **kwargs)
+
+        self.num_views = num_views
+        self.use_t_input = use_t_input
+        self.c_dropout = float(c_dropout)
+        self.c_dropout_start_frame = float(c_dropout_start_frame)
+        self.text_encoder = Level(
+            [
+                TransformerLayer(
+                    d_model=text_enc_dim,
+                    use_ca=False,
+                    self_rope_mode="1d",
+                )
+                for _ in range(text_enc_depth)
+            ]
+        )
+
+        self.backbone = Level(
+            [
+                TransformerLayer(
+                    d_model=self.width,
+                    d_cross=self.d_cross,
+                    d_cond_norm=self.d_cond_norm,
+                    cross_rope_mode="none",
+                )
+                for _ in range(self.depth)
+            ]
+        )
+
+        self.img_emb_dim = self.d_cross
+        self.learnable_emb_dino = nn.Parameter(torch.randn(num_views, self.img_emb_dim) * 0.02, requires_grad=True)
+        self.learnable_emb_grid_tokens = nn.Parameter(torch.randn(num_views, self.width) * 0.02, requires_grad=True)
+        self.ca_mask_token = nn.Parameter(torch.randn(self.d_cross) * 0.02, requires_grad=True)
+
+        if use_t_input:
+            self.start_t_mapping = InputMLP(
+                in_features=1,
+                dim=self.d_cross,
+                random_fourier=True,
+                theta=10.0 * math.pi,
+            )
+
+        # In the Libero multi-view setup we append DINO tokens from all views.
+        # `out_proj` must therefore strip `num_views * (nh * nw)` extra tokens.
+        self.out_proj = CondTokenConcatSplit(
+            in_features=self.width,
+            out_features=self.latent_dim,
+            num_extra_tokens=self.num_views * self.grid_size[1] * self.grid_size[2],
+        )
+
+        n_latent_tokens = self.grid_size[0] * self.grid_size[1] * self.grid_size[2]
+        self.val_shape = (self.num_views * n_latent_tokens, self.latent_dim)
+
+    def get_pos(self, x: Float[torch.Tensor, "b l c"]) -> Float[torch.Tensor, "b l 3"]:
+        tokens_per_view = self.grid_size[0] * self.grid_size[1] * self.grid_size[2]
+        expected = self.num_views * tokens_per_view
+        if x.shape[1] != expected:
+            raise ValueError(f"Expected {expected} latent tokens, got {x.shape[1]}")
+        pos_single = super().get_pos(x[:, :tokens_per_view])
+        return einops.repeat(pos_single, "b l c -> b (v l) c", v=self.num_views)
+
+    def get_start_frame_embed(self, start_frame):
+        if start_frame.ndim == 4:
+            return super().get_start_frame_embed(start_frame)
+        if start_frame.ndim != 5:
+            raise ValueError(f"Expected start_frame with shape [B, V, H, W, C], got {tuple(start_frame.shape)}")
+
+        batch_size, num_views, _, _, _ = start_frame.shape
+        if num_views != self.num_views:
+            raise ValueError(f"Expected {self.num_views} views, got {num_views}")
+
+        start_frame_flat = einops.rearrange(start_frame, "b v h w c -> (b v) h w c")
+        start_frame_embed = self.img_embedder(start_frame_flat.clip(-1, 1))
+        _, nh, nw, _ = start_frame_embed.shape
+
+        start_frame_embed = einops.rearrange(
+            start_frame_embed, "(b v) nh nw c -> b v (nh nw) c", b=batch_size, v=num_views
+        )
+        start_frame_embed = start_frame_embed + einops.rearrange(self.learnable_emb_dino, "v c -> 1 v 1 c")
+        start_frame_embed = einops.rearrange(start_frame_embed, "b v l c -> b (v l) c")
+
+        start_frame_pos = torch.cat(
+            (
+                torch.full((nh * nw, 1), -1.0, dtype=start_frame.dtype, device=start_frame.device),
+                make_axial_pos_2d(nh, nw, device=start_frame.device),
+            ),
+            dim=-1,
+        )
+        start_frame_pos = einops.repeat(start_frame_pos, "l c -> b (v l) c", b=batch_size, v=num_views)
+        return start_frame_embed, start_frame_pos
+
+    def _append_start_t(self, cond: dict[str, torch.Tensor], start_t: Float[torch.Tensor, "b"] | None):
+        if not self.use_t_input:
+            return cond
+        if start_t is None:
+            raise ValueError("start_t must be provided when use_t_input=True.")
+
+        start_t_emb = self.start_t_mapping(einops.rearrange(start_t.to(cond["x_cross"].dtype), "b -> b 1 1"))
+        start_t_emb = start_t_emb.to(dtype=cond["x_cross"].dtype, device=cond["x_cross"].device)
+        cond["x_cross"] = torch.cat((cond["x_cross"], start_t_emb), dim=1)
+
+        return cond
+
+    def get_static_conditioning(
+        self,
+        start_frame: Float[torch.Tensor, "b v h w c"],
+        track_conds: Float[torch.Tensor, "b n_cond 5"],
+        txt_emb: Float[torch.Tensor, "b t c"],
+        start_t: Float[torch.Tensor, "b"] | None = None,
+    ):
+        cond = super().get_static_conditioning(start_frame=start_frame, track_conds=track_conds)
+        txt_emb = txt_emb.to(device=cond["x_cross"].device, dtype=cond["x_cross"].dtype)
+        batch_size, num_txt_tokens, _ = txt_emb.shape
+        txt_pos = torch.arange(num_txt_tokens, device=txt_emb.device)[None, :, None].expand(batch_size, -1, 1)
+        cond["x_cross"] = self.text_encoder(x=txt_emb, pos=txt_pos)
+
+        _, token_count, _ = cond["extra_tokens"].shape
+        tokens_per_view = token_count // self.num_views
+        cond["learned_pos_emb"] = einops.repeat(
+            self.learnable_emb_grid_tokens,
+            "v c -> b (v l) c",
+            b=batch_size,
+            l=tokens_per_view,
+        )
+
+        if self.training and self.c_dropout > 0.0:
+            keep_mask = (torch.rand(batch_size, device=cond["x_cross"].device) >= self.c_dropout)[:, None, None]
+            mask_token = einops.rearrange(
+                self.ca_mask_token.to(dtype=cond["x_cross"].dtype, device=cond["x_cross"].device),
+                "c -> 1 1 c",
+            ).expand(batch_size, 1, -1)
+            cond["x_cross"] = torch.where(keep_mask, cond["x_cross"], mask_token)
+
+        cond = self._append_start_t(cond, start_t=start_t)
+
+        if self.training and self.c_dropout_start_frame > 0.0:
+            keep_mask = (torch.rand(batch_size, device=cond["x_cross"].device) >= self.c_dropout_start_frame)[
+                :, None, None
+            ]
+            mask_token = einops.rearrange(
+                self.ca_mask_token.to(dtype=cond["extra_tokens"].dtype, device=cond["extra_tokens"].device),
+                "c -> 1 1 c",
+            ).expand(batch_size, 1, -1)
+            cond["extra_tokens"] = torch.where(keep_mask, cond["extra_tokens"], mask_token)
+
+        return cond
+
+    def get_static_unconditioning(
+        self,
+        start_frame: Float[torch.Tensor, "b v h w c"],
+        start_t: Float[torch.Tensor, "b"] | None = None,
+    ):
+        cond = super().get_static_unconditioning(start_frame=start_frame)
+        batch_size = start_frame.shape[0]
+
+        _, token_count, _ = cond["extra_tokens"].shape
+        if token_count % self.num_views != 0:
+            raise ValueError(f"Token count ({token_count}) must be divisible by num_views ({self.num_views}).")
+        tokens_per_view = token_count // self.num_views
+        cond["learned_pos_emb"] = einops.repeat(
+            self.learnable_emb_grid_tokens,
+            "v c -> b (v l) c",
+            b=batch_size,
+            l=tokens_per_view,
+        )
+
+        cond["x_cross"] = einops.rearrange(
+            self.ca_mask_token.to(dtype=cond["extra_tokens"].dtype, device=cond["extra_tokens"].device),
+            "c -> 1 1 c",
+        ).expand(batch_size, 1, -1)
+        cond["pos_cross"] = torch.zeros(
+            (batch_size, 1, 3),
+            dtype=cond["x_cross"].dtype,
+            device=cond["x_cross"].device,
+        )
+
+        cond = self._append_start_t(cond, start_t=start_t)
+        return cond
+
+    def _predict_velocity(self, x_t, t, static_cond):
+        cond_norm = self._time_condition(t.to(x_t.dtype))
+        pos = self.get_pos(x_t)
+        x_t, pos = self.in_proj(x_t, pos, **static_cond)
+
+        learned_pos_emb = static_cond.get("learned_pos_emb")
+        if learned_pos_emb is not None:
+            learned_pos_emb = learned_pos_emb.to(device=x_t.device, dtype=x_t.dtype)
+            n_grid = learned_pos_emb.shape[1]
+            x_t = torch.cat((x_t[:, :n_grid] + learned_pos_emb, x_t[:, n_grid:]), dim=1)
+
+        x_t = self.backbone(x_t, pos=pos, cond_norm=cond_norm, **static_cond)
+        return self.out_proj(x_t)
+
+    def _rf_loss(
+        self,
+        latents: Float[torch.Tensor, "b l c"],
+        start_frame: Float[torch.Tensor, "b v h w c"],
+        track_conds: Float[torch.Tensor, "b n_cond 5"],
+        txt_emb: Float[torch.Tensor, "b t c"],
+        start_t: Float[torch.Tensor, "b"] | None = None,
+    ):
+        batch_size = latents.shape[0]
+        t = torch.sigmoid(torch.randn((batch_size,), device=latents.device, dtype=latents.dtype))
+        t_expanded = t.view(batch_size, 1, 1)
+        noise = torch.randn_like(latents)
+        x_t = (1 - t_expanded) * latents + t_expanded * noise
+
+        static_cond = self.get_static_conditioning(
+            start_frame=start_frame,
+            track_conds=track_conds,
+            txt_emb=txt_emb,
+            start_t=start_t,
+        )
+        velocity = self._predict_velocity(x_t, t, static_cond)
+        return ((noise - latents - velocity) ** 2).mean(dim=(1, 2))
+
+    def forward(
+        self,
+        tracks_enc_yx: Float[torch.Tensor, "b v n t 2"],
+        start_frame: Float[torch.Tensor, "b v h w c"],
+        task_emb_bert: Float[torch.Tensor, "b c"],
+        start_t: Float[torch.Tensor, "b"] | None = None,
+        **kwargs,
+    ):
+        del kwargs
+        txt_emb = einops.rearrange(task_emb_bert, "b c -> b 1 c").to(device=start_frame.device)
+
+        batch_size, num_views, _, _, _ = tracks_enc_yx.shape
+        if num_views != self.num_views:
+            raise ValueError(f"Expected {self.num_views} views, got {num_views}")
+
+        with torch.no_grad():
+            track_conds, _ = self.get_track_cond(tracks_enc_yx[:, 0, ...])
+
+            tracks_enc_yx_flat = einops.rearrange(tracks_enc_yx, "b v n t c -> (b v) n t c")
+            start_frame_flat = einops.rearrange(start_frame, "b v h w c -> (b v) h w c")
+            encoded = self.vae.encode(tracks_enc_yx_flat, start_frame=start_frame_flat)
+            latents = self.normalize_latents(encoded.mean)
+            latents = einops.rearrange(latents, "(b v) l c -> b (v l) c", b=batch_size, v=num_views)
+
+        rf_loss = self._rf_loss(
+            latents=latents,
+            start_frame=start_frame,
+            track_conds=track_conds,
+            txt_emb=txt_emb,
+            start_t=start_t,
+        )
+        return dict(rf_loss=rf_loss), dict()
+
+    @torch.no_grad()
+    def sample(
+        self,
+        z: Float[torch.Tensor, "b l c"],
+        track_conds: Float[torch.Tensor, "b n_cond 5"],
+        txt_emb: Float[torch.Tensor, "b t c"],
+        points_per_traj: int | None = None,
+        query_pos: Float[torch.Tensor, "b v n 2"] | None = None,
+        start_frame: Float[torch.Tensor, "b v h w c"] | None = None,
+        sample_steps: int = 50,
+        return_list: bool = False,
+        decode_latent: bool = True,
+        start_t: Float[torch.Tensor, "b"] | None = None,
+        **kwargs,
+    ):
+        del kwargs
+
+        if start_frame is None:
+            raise ValueError("start_frame must be provided.")
+
+        batch_size = z.shape[0]
+        txt_emb = txt_emb.to(device=z.device)
+
+        dt = torch.full((batch_size, 1, 1), 1.0 / sample_steps, device=z.device, dtype=z.dtype)
+
+        static_cond = self.get_static_conditioning(
+            start_frame=start_frame,
+            track_conds=track_conds,
+            txt_emb=txt_emb,
+            start_t=start_t,
+        )
+        static_uncond = (
+            self.get_static_unconditioning(start_frame=start_frame, start_t=start_t) if self.cfg_scale > 1.0 else None
+        )
+
+        latents = z
+        trajectory = [latents] if return_list else None
+        for step in range(sample_steps, 0, -1):
+            t = torch.full((batch_size,), step / sample_steps, device=z.device, dtype=z.dtype)
+            cond_velocity = self._predict_velocity(latents, t, static_cond)
+
+            if static_uncond is None:
+                latents = latents - dt * cond_velocity
+            else:
+                uncond_velocity = self._predict_velocity(latents, t, static_uncond)
+                guided_velocity = uncond_velocity + self.cfg_scale * (cond_velocity - uncond_velocity)
+                latents = latents - dt * guided_velocity
+
+            if return_list:
+                trajectory.append(latents)
+
+        if return_list:
+            return trajectory
+
+        if not decode_latent:
+            return latents
+
+        latents = self.denormalize_latents(latents)
+        if query_pos is None:
+            raise ValueError("query_pos must be provided for decoding.")
+        if points_per_traj is None:
+            raise ValueError("points_per_traj must be provided for decoding.")
+
+        latents = einops.rearrange(latents, "b (v l) c -> (b v) l c", v=self.num_views)
+        start_frame = einops.rearrange(start_frame, "b v h w c -> (b v) h w c")
+        query_pos = einops.rearrange(query_pos, "b v n c -> (b v) n c")
+
+        tracks = self.vae.decode(
+            latents=latents,
+            query_pos=query_pos,
+            points_per_track=points_per_traj,
+            start_frame=start_frame,
+        )
+        return einops.rearrange(tracks, "(b v) n t c -> b v n t c", v=self.num_views)

@@ -104,3 +104,77 @@ class AxialRoPE3D(nn.Module):
         theta_h = pos[..., None, 1:2] * self.yx_freqs[0].to(pos.dtype)
         theta_w = pos[..., None, 2:3] * self.yx_freqs[1].to(pos.dtype)
         return torch.cat((theta_t, theta_h, theta_w), dim=-1)
+
+
+class AxialRoPE2D(nn.Module):
+    def __init__(
+        self,
+        dim: int,
+        n_heads: int,
+        half_embedding: bool = True,
+        yx_min_theta: float = 0.0,
+        yx_max_theta: float = 40.0 * math.pi,
+    ):
+        super().__init__()
+
+        if half_embedding:
+            assert dim % 2 == 0, "Half embedding is only supported for even dimensions"
+            dim //= 2
+
+        freqs = torch.stack(
+            [
+                torch.linspace(
+                    math.log(yx_min_theta) if yx_min_theta > 0 else 0.0,
+                    math.log(yx_max_theta),
+                    n_heads * dim // 4 + 1,
+                )[:-1].exp()
+            ]
+            * 2
+        )
+        self.freqs = nn.Parameter(freqs.view(2, dim // 4, n_heads).mT.contiguous())
+
+    def apply_emb(self, x, theta):
+        return apply_rotary_emb(x, theta)
+
+    def extra_repr(self):
+        return f"dim={self.freqs.shape[-2] * 4}, n_heads={self.freqs.shape[-1]}"
+
+    def forward(self, pos):
+        theta_h = pos[..., None, 0:1] * self.freqs[0].to(pos.dtype)
+        theta_w = pos[..., None, 1:2] * self.freqs[1].to(pos.dtype)
+        return torch.cat((theta_h, theta_w), dim=-1)
+
+
+class AxialRoPE1D(nn.Module):
+    def __init__(
+        self,
+        dim: int,
+        n_heads: int,
+        half_embedding: bool = True,
+        theta: int = 1_000,
+        learnable_freqs: bool = False,
+    ):
+        super().__init__()
+
+        if half_embedding:
+            assert dim % 2 == 0, "Half embedding is only supported for even dimensions"
+            dim //= 2
+
+        min_freq = 1 / theta
+        max_freq = 1.0
+
+        log_min = math.log(min_freq)
+        log_max = math.log(max_freq)
+        freqs = torch.linspace(log_min, log_max, n_heads * dim // 2 + 1)[:-1].exp()
+        freqs_ = freqs.view(1, dim // 2, n_heads).mT.contiguous()
+        self.freqs = nn.Parameter(freqs_, requires_grad=learnable_freqs)
+
+    def apply_emb(self, x, theta):
+        return apply_rotary_emb(x, theta)
+
+    def extra_repr(self):
+        return f"dim={self.freqs.shape[-1] * 2}, n_heads={self.freqs.shape[-2]}"
+
+    def forward(self, pos):
+        theta = pos[..., None, 0:1] * self.freqs[0].to(pos.dtype)
+        return theta
