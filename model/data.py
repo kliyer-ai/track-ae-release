@@ -110,7 +110,7 @@ class TrackerDataModule:
     def __init__(
         self,
         train: dict,
-        validation: dict,
+        validation: dict | None = None,
         n_encoder_trajectories: int = 40,
         n_decoder_trajectories: int | None = 40,
         n_samples: int = 64,  # number of samples per trajectory (frames)
@@ -321,7 +321,7 @@ class TrackerDataModule:
         )
 
     def val_dataloader(self):
-        # return self.get_loader(self.dataset_configs["val"], "val")
+        assert self.validation is not None, "Validation config is not provided"
         return self.get_loader(
             **self.validation,
             repeat_shards=True,

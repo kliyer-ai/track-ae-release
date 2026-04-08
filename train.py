@@ -111,10 +111,7 @@ def train(
     # Important setup stuff
     # If you want to change anything about what you train, you'll likely want to do it here and add it as a parameter to train()
     model: TrackVAE = TrackVAE().to(device)
-    data = TrackerDataModule(
-        train=dict(shards=[train_data_tar_base], batch_size=local_batch_size, num_workers=16),
-        validation=dict(shards=[val_data_tar_base], batch_size=1, num_workers=4),
-    )
+    data = TrackerDataModule(train=dict(shards=[train_data_tar_base], batch_size=local_batch_size, num_workers=16))
     optimizer = torch.optim.AdamW(model.parameters(), lr=lr, betas=(0.9, 0.99), fused=compile)
     scheduler = torch.optim.lr_scheduler.SequentialLR(
         optimizer,
