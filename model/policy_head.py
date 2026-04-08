@@ -9,7 +9,7 @@ from einops import rearrange, repeat
 from jaxtyping import Float, Int
 from torch import nn
 from typing import Dict
-from utils.utils import sample_grid
+from utils.libero_utils.viz import sample_grid
 
 
 class PolicyHead(nn.Module):
