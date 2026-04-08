@@ -26,17 +26,16 @@ def endless_iter(iterable):
 # Add arguments here to make them configurable via CLI
 def train(
     # General
-    out_dir="output",
+    out_dir="outputs",
     load_checkpoint: str | None = None,
     checkpoint_freq: int = 10_000,
     max_steps: int = 1_000_000,
     warmup_steps: int = 100_000,
     # Data
-    train_data_tar_base: str = "data",
-    val_data_tar_base: str = "data",
+    train_data_tar_base: str = "/export/group/datasets/koala-tapnext-subset",
     # Training
-    local_batch_size: int = 32,
-    lr: float = 5e-5,
+    local_batch_size: int = 4,
+    lr: float = 1e-4,
     clip_grad_norm: float = 1.0,
     # Misc
     compile: bool = False,
@@ -87,7 +86,7 @@ def train(
         import wandb
 
         wandb.init(
-            project="flow-poke-transformer",
+            project="release-track-ae",
             config=train_params | {"global_batch_size": local_batch_size * world_size},
             dir=out_dir,
         )
@@ -153,9 +152,9 @@ def train(
     ):
         try:
             optimizer.zero_grad()
-            loss, metrics = model(
-                {k: v.to(device, non_blocking=True) if torch.is_tensor(v) else v for k, v in batch.items()},
-            )
+            batch = {k: v.to(device, non_blocking=True) if torch.is_tensor(v) else v for k, v in batch.items()}
+            loss_dict, metrics = model(**batch)
+            loss = sum(loss_dict.values())
             loss.backward()
             grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), clip_grad_norm)
             optimizer.step()
@@ -167,17 +166,27 @@ def train(
                 else loss.detach()
             )
 
+            loss_dict = {
+                k: (
+                    dist_nn.all_reduce(v.detach(), op=dist.ReduceOp.SUM) / world_size if is_distributed else v.detach()
+                ).item()
+                for k, v in loss_dict.items()
+            }
             metrics = {
                 k: (
                     dist_nn.all_reduce(v.detach(), op=dist.ReduceOp.SUM) / world_size if is_distributed else v.detach()
                 ).item()
                 for k, v in metrics.items()
             }
-            train_meta = {
-                "loss": avg_loss.item(),
-                "grad_norm": grad_norm.item(),
-                "lr": scheduler.get_last_lr()[0],
-            } | metrics
+            train_meta = (
+                {
+                    "loss": avg_loss.item(),
+                    "grad_norm": grad_norm.item(),
+                    "lr": scheduler.get_last_lr()[0],
+                }
+                | loss_dict
+                | metrics
+            )
 
             pbar.set_postfix(train_meta)
             if enable_wandb and rank == 0:

@@ -388,6 +388,7 @@ def predict(
     n_vis_tracks: int = 80,
     n_decoder_tracks: int = 80,
     decode_grid: bool = False,
+    decode_dense: bool = False,
     seed: int = 42,
 ) -> tuple[UInt8[np.ndarray, "h w c"], None]:
     assert inputs.image is not None, "Image input is required for prediction."
@@ -441,11 +442,14 @@ def predict(
             query_pos=query_points.expand(batch_size, -1, -1) * 2 - 1,
             start_frame=torch.from_numpy(inputs.image).to(device).expand(batch_size, -1, -1, -1).float() / 127.5 - 1.0,
             track_conds=track_conds.expand(batch_size, -1, -1),  # (batch_size, n_pokes, 5)
+            decode_dense=decode_dense,
         )
 
     H, W, C = inputs.image.shape
 
     pred_tracks = (pred_tracks.flip(-1) + 1) / 2 * torch.tensor([W, H], device=device)
+    if decode_dense:
+        pred_tracks = einops.rearrange(pred_tracks, "b h w t c -> b (h w) t c")
 
     out_frames = []
     out_videos = []
@@ -494,8 +498,12 @@ def predict(
                 start_frame=torch.from_numpy(inputs.image).to(device).expand(batch_size, -1, -1, -1).float() / 127.5
                 - 1.0,
                 track_conds=track_conds.expand(batch_size, -1, -1),  # (batch_size, n_pokes, 5)
+                decode_dense=decode_dense,
             )
-        grid = einops.rearrange(pred_tracks, "b (h w) t c -> b t c h w", h=H, w=W)[0]
+        if decode_dense:
+            grid = einops.rearrange(pred_tracks[0], "h w t c -> t c h w")
+        else:
+            grid = einops.rearrange(pred_tracks, "b (h w) t c -> b t c h w", h=H, w=W)[0]
         flow = torch.diff(grid, dim=0)
         flow_video = flow_to_image(flow.float())
         flow_video = resize(flow_video, size=[256, 256])
@@ -564,10 +572,11 @@ def demo(
         gr.Markdown("## Motion Spaces Demo")
 
         vae = TrackVAE()
-        model = TrackFM(vae=vae)
+        model = TrackFM(vae=vae, vae_shift=-0.17, vae_scale=12.0)
 
         sd = torch.load(
-            "/export/scratch/ra49veb/checkpoints/track-project/327613-n16-endt-unlock-repro-actually-rebalanced/checkpoints/step-650000/model.pt"
+            # "/export/scratch/ra49veb/checkpoints/track-project/327613-n16-endt-unlock-repro-actually-rebalanced/checkpoints/step-650000/model.pt"
+            "/export/scratch/ra49veb/checkpoints/track-project/168292-n16-endt-fixed/checkpoints/step-700000/model.pt"
         )
 
         sd = {
@@ -730,6 +739,7 @@ def demo(
                     n_decoder_tracks = gr.Number(label="Number of Decoder Tracks", value=80, precision=0, minimum=1)
                     n_vis_tracks = gr.Number(label="Number of Visualization Tracks", value=80, precision=0, minimum=1)
                     decode_grid = gr.Checkbox(label="Use Decoding Grid", value=False)
+                    decode_dense = gr.Checkbox(label="Use Dense Decoding", value=False)
                     seed = gr.Slider(label="Random Seed", minimum=0, maximum=2**32 - 1, step=1, value=42)
 
                 predict_button.click(
@@ -741,6 +751,7 @@ def demo(
                         n_vis_tracks,
                         n_decoder_tracks,
                         decode_grid,
+                        decode_dense,
                         seed,
                     ],
                     outputs=[

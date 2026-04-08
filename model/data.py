@@ -250,7 +250,7 @@ class TrackerDataModule:
         else:
             out_dict["start_frame"] = get_frames_decord(sample["video.mp4"], [start_idx])[0]  # (H, W, C) in [-1, 1]
 
-        out_dict["start_frame"] = resize(out_dict["start_frame"].movedim(-1, 1), list(self.frame_size)).movedim(1, -1)
+        out_dict["start_frame"] = resize(out_dict["start_frame"].movedim(-1, 0), list(self.frame_size)).movedim(0, -1)
 
         return out_dict
 
@@ -298,7 +298,7 @@ class TrackerDataModule:
             wds.split_by_worker,
             partial(wds.tarfile_samples, handler=wds.warn_and_continue),
             *([wds.shuffle(shuffle)] if shuffle != 0 else []),
-            self.get_camera_static,
+            wds.select(self.get_camera_static),
             wds.map(partial(self.decode, decode_video=decode_video)),
             wds.select(self.filter),
             wds.batched(batch_size, partial=False, collation_fn=dict_collation_fn),

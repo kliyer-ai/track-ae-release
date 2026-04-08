@@ -310,6 +310,7 @@ class TrackFM(nn.Module):
         start_frame: Float[torch.Tensor, "b h w c"],
         sample_steps: int = 50,
         decode_latent: bool = True,
+        decode_dense: bool = False,
     ):
         batch_size = z.shape[0]
         dt = torch.full((batch_size, 1, 1), 1.0 / sample_steps, device=z.device, dtype=z.dtype)
@@ -333,6 +334,13 @@ class TrackFM(nn.Module):
         latents = self.denormalize_latents(latents)
         if not decode_latent:
             return latents
+
+        if decode_dense:
+            return self.vae.decode_dense(
+                latents=latents,
+                points_per_track=points_per_traj,
+                start_frame=start_frame,
+            )
 
         return self.vae.decode(
             latents=latents,
