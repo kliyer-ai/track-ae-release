@@ -309,6 +309,7 @@ class TrackerDataModule:
             batch_size=None,
             num_workers=num_workers,
             prefetch_factor=prefetch_factor,
+            pin_memory=True,
         )
 
     def train_dataloader(self):
@@ -323,7 +324,6 @@ class TrackerDataModule:
         # return self.get_loader(self.dataset_configs["val"], "val")
         return self.get_loader(
             **self.validation,
-            shuffle=0,
             repeat_shards=True,
             repeat_shards_deterministic=True,
             shard_detshuffle=True,
