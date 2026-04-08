@@ -4,6 +4,7 @@ import einops
 import torch
 from jaxtyping import Float
 from torch import nn
+from tqdm import trange
 
 from model.blocks import FeedForwardBlock, InputMLP, Level, RMSNorm, TransformerLayer
 from model.dino import MinDino
@@ -317,7 +318,7 @@ class TrackFM(nn.Module):
         static_uncond = self.get_static_unconditioning(start_frame=start_frame) if self.cfg_scale > 1.0 else None
 
         latents = z
-        for step in range(sample_steps, 0, -1):
+        for step in trange(sample_steps, 0, -1, desc="Sampling"):
             t = torch.full((batch_size,), step / sample_steps, device=z.device, dtype=z.dtype)
             cond_velocity = self._predict_velocity(latents, t, static_cond)
 

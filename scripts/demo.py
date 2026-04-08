@@ -19,8 +19,7 @@ import numpy as np
 import torch
 from jaxtyping import UInt8
 from matplotlib.patches import Circle, FancyArrowPatch, Rectangle
-from mpl_toolkits.mplot3d import Axes3D
-from PIL import Image
+from PIL import Image, ImageDraw
 from torchvision.transforms.functional import resize
 from torchvision.utils import flow_to_image
 
@@ -29,234 +28,6 @@ from model.rope import make_axial_pos_2d
 from model.vae import TrackVAE
 
 VAL_SHAPE = [256, 16]
-
-
-def visualize_trajectories(
-    start_frame: UInt8[np.ndarray, "H W C"] | None,
-    trajectories: UInt8[np.ndarray, "N T 2"] | list[UInt8[np.ndarray, "T 2"]],
-    elev=10,
-    azim=75,
-    show_colorbar=False,
-    show_points=False,
-    show_lines=True,
-    proj_type="ortho",
-    shadows=True,
-    keep_aspect=True,
-    center_crop: bool = False,
-):
-    """
-    Visualize particle trajectories in 3D with time as the third dimension.
-
-    Parameters:
-    -----------
-    start_frame : numpy.ndarray
-        The initial frame image (2D or 3D array)
-    trajectories : list of numpy.ndarray
-        List of trajectories, where each trajectory is an array of shape (N, 2) or (N, 3)
-        containing (x, y) or (x, y, t) coordinates over time
-    """
-    H, W, _ = start_frame.shape
-    min_size = min(H, W)
-
-    if center_crop:  # only center crop the visualization
-        start_h = (H - min_size) // 2
-        start_w = (W - min_size) // 2
-        start_frame = start_frame[start_h : start_h + min_size, start_w : start_w + min_size, :]
-        H, W, _ = start_frame.shape
-        # adjust trajectory pixel coords accordingly
-        trajectories = (trajectories - np.array([start_w, start_h], dtype=trajectories.dtype)) * np.array(
-            [min_size / W, min_size / H], dtype=trajectories.dtype
-        )
-
-    fig = plt.figure(figsize=(5, 5))
-    # computed_zorder=False to allow manual z-ordering
-    # this is because .scatter() is buggy with zorder otherwise
-    ax: Axes3D = fig.add_subplot(111, projection="3d", computed_zorder=False, proj_type=proj_type)
-
-    if keep_aspect:
-        ax.set_box_aspect((W / H, 1, 1))  # this is the only way I found to adjust the aspect ratio
-    else:
-        ax.set_box_aspect((1, 1, 1))  # this is needed bc otherwise images are somehow slightly non-square
-
-    # not sure if these two lines are needed, but they do no harm
-    fig.subplots_adjust(left=0.0, right=1.0, bottom=0.0, top=1.0, wspace=0.0, hspace=0.0)
-    ax.set_position([0.0, 0.0, 1.0, 1.0])
-
-    # Display the start frame as a textured surface at y=0
-    if start_frame is not None:
-        # Use actual pixel coordinates for full resolution
-        x_img = np.arange(W)
-        z_img = np.arange(H)
-        X_img, Z_img = np.meshgrid(x_img, z_img)
-        Y_img = np.zeros_like(X_img)
-
-        # Handle grayscale or color images
-        if len(start_frame.shape) == 2:
-            colors = plt.cm.gray(start_frame / 255.0)
-        else:
-            # Normalize if needed
-            if start_frame.max() > 1.0:
-                colors = start_frame / 255.0
-            else:
-                colors = start_frame
-
-        ax.plot_surface(
-            X_img,
-            Y_img,
-            Z_img,
-            facecolors=colors,
-            shade=False,
-            alpha=0.7,
-            antialiased=True,
-            rcount=H,
-            ccount=W,
-            zorder=-1,  # ensure the image is at the back
-        )
-
-    # Create a colormap for time progression (blue to red)
-    cmap = cm.get_cmap("jet")
-
-    # Find the maximum time across all trajectories for normalization
-    max_time = 0
-    for traj in trajectories:
-        if traj.shape[1] >= 3:
-            max_time = max(max_time, traj[:, 2].max())
-        else:
-            max_time = max(max_time, len(traj))
-
-    # Plot shadows
-    if shadows:
-        for traj in trajectories:
-            if len(traj) < 2:
-                continue
-
-            # Extract coordinates
-            if traj.shape[1] >= 3:
-                x, z, t = traj[:, 0], traj[:, 1], traj[:, 2]
-            else:
-                x, z = traj[:, 0], traj[:, 1]
-                t = np.arange(len(traj))
-
-            # Fake blurry variant
-            for lw in np.exp(np.linspace(math.log(1), math.log(16), 50)):
-                ax.plot(
-                    x,
-                    t,
-                    np.full(z.shape, H),
-                    color="black",
-                    linewidth=lw,
-                    alpha=0.005,
-                    zorder=-10,
-                    marker="",
-                )
-
-    # Plot each trajectory
-    for traj in trajectories:
-        if len(traj) < 2:
-            continue
-
-        # Extract coordinates
-        if traj.shape[1] >= 3:
-            x, z, t = traj[:, 0], traj[:, 1], traj[:, 2]
-        else:
-            x, z = traj[:, 0], traj[:, 1]
-            t = np.arange(len(traj))
-
-        # Normalize time for coloring
-        t_norm = t / max_time if max_time > 0 else t
-
-        if show_lines:
-            # Plot the trajectory line segments with color gradient
-            for i in range(len(x) - 1):
-                color = cmap(t_norm[i])
-                current_t = t[i]
-                ax.plot(
-                    [x[i], x[i + 1]],
-                    [t[i], t[i + 1]],
-                    [z[i], z[i + 1]],
-                    color=color,
-                    linewidth=2,
-                    alpha=0.8,
-                    zorder=current_t + 50,
-                    marker="",
-                )
-        if show_points:
-            # Add dots at each point
-            colors_scatter = [cmap(tn) for tn in t_norm]
-            for i in range(len(x)):
-                current_t = t[i]
-                ax.scatter(
-                    [x[i]],
-                    [t[i]],
-                    [z[i]],
-                    c=[colors_scatter[i]],
-                    s=30,
-                    alpha=1.0,
-                    edgecolors="black",
-                    linewidth=0.5,
-                    zorder=current_t + 50 + 1e-6,  # ensure points are on top of lines
-                )
-
-    # Set labels and title
-    ax.set_ylabel("  Time    ", labelpad=-12)
-
-    # Time axis
-    ax.set_yticks([], minor=True)
-    ax.set_yticks([16, 32, 48], minor=False)
-    ax.set_yticklabels([])
-    x_ticks = [(W / 5) * i for i in range(1, 5)]
-    ax.set_xticks(x_ticks, minor=False)
-    ax.set_zticks([50, 100, 150, 200], minor=False)
-    # Image axes
-    ax.set_xticks([], minor=True)
-    ax.set_zticks([], minor=True)
-    ax.tick_params(axis="x", which="major", length=0, width=0, zorder=-100)
-    ax.tick_params(axis="z", which="major", length=0, width=0, zorder=-100)
-    ax.set_xticklabels([])
-    ax.set_zticklabels([])
-    ax.xaxis.pane.set_edgecolor("black")
-    ax.zaxis.pane.set_edgecolor("black")
-    ax.xaxis.pane.set_facecolor("#F1F1F1")
-    ax.zaxis.pane.set_facecolor("#F1F1F1")
-
-    ax.plot([0, W - 1], [0, 0], [0, 0], color="black", linewidth=1, alpha=0.66, zorder=10, clip_on=False)
-    ax.plot([0, 0], [0, 0], [0, H], color="black", linewidth=1, alpha=0.66, zorder=10, clip_on=False)
-    ax.plot([0, W - 1], [0, 0], [H, H], color="black", linewidth=1, alpha=0.66, zorder=10, clip_on=False)
-    ax.plot([W - 1, W - 1], [0, 0], [0, H], color="black", linewidth=1, alpha=0.66, zorder=10, clip_on=False)
-    ax.plot([0, W], [max_time, max_time], [0, 0], color="black", linewidth=1, alpha=0.66, zorder=1000, clip_on=False)
-    ax.plot([0, 0], [max_time, max_time], [0, H], color="black", linewidth=1, alpha=0.66, zorder=1000, clip_on=False)
-    ax.plot([W, W], [max_time, max_time], [0, H], color="black", linewidth=1, alpha=0.66, zorder=1000, clip_on=False)
-    ax.plot([W - 1, W], [0, max_time], [0, 0], color="black", linewidth=1, alpha=0.66, zorder=10, clip_on=False)
-    ax.plot(
-        [0, 0],
-        [0, max_time],
-        [0, 0],
-        color="black",
-        linewidth=1,
-        alpha=0.66,
-        linestyle=(0, (5, 5)),
-        zorder=1000,
-        clip_on=False,
-    )
-
-    # Set the viewing angle for better visualization
-    ax.view_init(elev=elev, azim=azim)
-
-    # Add a colorbar
-    if show_colorbar:
-        sm = cm.ScalarMappable(cmap=cmap, norm=plt.Normalize(vmin=0, vmax=max_time))
-        sm.set_array([])
-        cbar = plt.colorbar(sm, ax=ax, pad=0.1, shrink=0.8)
-        cbar.set_label("Time (frames)", fontsize=12)
-
-    # Set axis limits
-    if start_frame is not None:
-        # the origin (0,0) is at the top-left corner of the image
-        ax.set_xlim(W, 0)
-        ax.set_zlim(H, 0)
-    ax.set_ylim(0, max_time)
-
-    return fig, ax
 
 
 def draw_trajectories_on_frame(
@@ -486,38 +257,127 @@ def render_input(inputs: SampleState) -> UInt8[np.ndarray, "h w c"]:
     return img
 
 
-def draw_3d(start_frame, trajectories, **kwargs) -> UInt8[np.ndarray, "h w c"]:
-    fig, ax = visualize_trajectories(start_frame, trajectories, elev=10, show_points=False, **kwargs)
-
-    fig.subplots_adjust(left=0, right=1, bottom=0, top=1)
-    ax.set_position([0.0, 0.0, 1.0, 1.0])
-    ax.margins(0)
-
-    fig.canvas.draw()
-    img = np.array(fig.canvas.buffer_rgba())[:, :, :3]
-    plt.close(fig)
-    return img
+def blend_image_with_white(
+    image: UInt8[np.ndarray, "H W C"],
+    white_mix: float = 0.45,
+) -> UInt8[np.ndarray, "H W C"]:
+    image_f = image.astype(np.float32) / 255.0
+    blended = image_f * (1.0 - white_mix) + white_mix
+    return np.clip(blended * 255.0, 0, 255).astype(np.uint8)
 
 
-def get_3d_plot(start_frame, trajectories, save_path=None, **kwargs):
-    fig, ax = visualize_trajectories(start_frame, trajectories, elev=10, show_points=False, **kwargs)
+def sample_track_colors(
+    image: UInt8[np.ndarray, "H W C"],
+    tracks: torch.Tensor,
+) -> list[tuple[int, int, int]]:
+    h, w, _ = image.shape
+    tracks_np = tracks.float().cpu().numpy()
+    colors = []
+    for pts in tracks_np:
+        valid = ~np.isnan(pts).any(axis=1)
+        if valid.any():
+            start_x, start_y = pts[valid][0]
+        else:
+            start_x, start_y = 0.0, 0.0
+        x = int(np.clip(np.rint(start_x), 0, w - 1))
+        y = int(np.clip(np.rint(start_y), 0, h - 1))
+        colors.append(tuple(int(channel) for channel in image[y, x]))
+    return colors
 
-    # Remove margins and fill the whole figure
-    fig.subplots_adjust(left=0, right=1, bottom=0, top=1)
-    ax.set_position([0.0, 0.0, 1.0, 1.0])
-    ax.margins(0)
 
-    # Draw the canvas before reading pixel data
-    fig.canvas.draw()
-    img = np.array(fig.canvas.buffer_rgba())[:, :, :3]  # Get RGB image for viz
+def render_track_video(
+    image: UInt8[np.ndarray, "H W C"],
+    tracks: torch.Tensor,
+    tail_length: int = 8,
+    line_width: float = 0.007,
+    marker_size: float = 0.012,
+    initial_hold_frames: int = 8,
+    fps: int = 12,
+    white_mix: float = 0.45,
+    motion_threshold: float = 1,  # in pixels
+) -> tuple[list[UInt8[np.ndarray, "H W C"]], int]:
+    assert image.ndim == 3 and image.shape[-1] == 3, "image must be [H, W, 3]"
 
-    # Optionally save as vector PDF
-    if save_path is not None:
-        plt.tight_layout()
-        fig.savefig(save_path, bbox_inches="tight", pad_inches=0, transparent=True)
+    h, w, _ = image.shape
+    scale_factor = min(h, w) * 1.5
+    line_px = max(1, math.ceil(line_width * scale_factor))
+    marker_px = max(2, math.ceil(marker_size * scale_factor))
 
-    plt.close(fig)
-    return img, save_path
+    base_image = Image.fromarray(blend_image_with_white(image, white_mix=white_mix)).convert("RGBA")
+    tracks_np = tracks.float().cpu().numpy()
+    num_tracks, num_steps, _ = tracks_np.shape
+    track_colors = sample_track_colors(image, tracks)
+    frames: list[UInt8[np.ndarray, "H W C"]] = []
+    moving_track_mask = np.zeros(num_tracks, dtype=bool)
+
+    for track_idx, pts in enumerate(tracks_np):
+        valid = ~np.isnan(pts).any(axis=1)
+        pts_valid = pts[valid]
+        if len(pts_valid) < 2:
+            continue
+        mean_movement = np.square(np.diff(pts_valid, axis=0)).mean()
+        moving_track_mask[track_idx] = mean_movement >= motion_threshold
+
+    def append_frame(draw_motion_until: int | None):
+        canvas = base_image.copy()
+        overlay = Image.new("RGBA", (w, h), (0, 0, 0, 0))
+        draw = ImageDraw.Draw(overlay, "RGBA")
+
+        for track_idx in range(num_tracks):
+            if not moving_track_mask[track_idx]:
+                continue
+            pts = tracks_np[track_idx]
+            color = track_colors[track_idx]
+            valid = ~np.isnan(pts).any(axis=1)
+            if not valid.any():
+                continue
+
+            pts_valid = pts[valid]
+            if draw_motion_until is None:
+                start_x, start_y = pts_valid[0]
+                draw.ellipse(
+                    (
+                        start_x - marker_px,
+                        start_y - marker_px,
+                        start_x + marker_px,
+                        start_y + marker_px,
+                    ),
+                    fill=(*color, 255),
+                )
+                continue
+
+            if len(pts_valid) < 2:
+                continue
+
+            head_idx = min(draw_motion_until, len(pts_valid) - 1)
+            tail_start = max(0, head_idx - tail_length + 1)
+
+            for step in range(tail_start, head_idx):
+                x1, y1 = pts_valid[step]
+                x2, y2 = pts_valid[step + 1]
+                alpha = int(255 * ((step - tail_start + 1) / max(head_idx - tail_start + 1, 1)))
+                draw.line((x1, y1, x2, y2), fill=(*color, alpha), width=line_px)
+
+            head_x, head_y = pts_valid[head_idx]
+            draw.ellipse(
+                (
+                    head_x - marker_px,
+                    head_y - marker_px,
+                    head_x + marker_px,
+                    head_y + marker_px,
+                ),
+                fill=(*color, 255),
+            )
+
+        frame = np.array(Image.alpha_composite(canvas, overlay).convert("RGB"))
+        frames.append(frame)
+
+    for _ in range(initial_hold_frames):
+        append_frame(draw_motion_until=None)
+    for step_idx in range(1, num_steps):
+        append_frame(draw_motion_until=step_idx)
+
+    return frames, fps
 
 
 @torch.no_grad()
@@ -529,11 +389,6 @@ def predict(
     n_decoder_tracks: int = 80,
     decode_grid: bool = False,
     seed: int = 42,
-    use_3d_viz: bool = False,
-    azim: float = 75.0,
-    use_ortho: bool = False,
-    keep_aspect: bool = False,
-    center_crop_viz: bool = False,
 ) -> tuple[UInt8[np.ndarray, "h w c"], None]:
     assert inputs.image is not None, "Image input is required for prediction."
 
@@ -593,49 +448,38 @@ def predict(
     pred_tracks = (pred_tracks.flip(-1) + 1) / 2 * torch.tensor([W, H], device=device)
 
     out_frames = []
+    out_videos = []
     # Save individual frames as PDF files for Gradio File outputs.
     pdf_paths = []
 
     for pred_track in pred_tracks:
-        # tracks are in [-1, 1] range
-        # convert the tracks to pixel coordinates
-        if use_3d_viz:
-            # out_frame = draw_3d(
-            #     inputs.image,
-            #     pred_track[:n_vis_tracks].int().cpu().numpy(),
-            #     azim=azim,
-            #     proj_type="ortho" if use_ortho else "persp",
-            #     keep_aspect=keep_aspect,
-            #     center_crop=center_crop_viz,
-            # )
-            tmp = tempfile.NamedTemporaryFile(suffix=".pdf", delete=False)
-            tmp.close()
-
-            out_frame, pdf_path = get_3d_plot(
-                inputs.image,
-                pred_track[:n_vis_tracks].int().cpu().numpy(),
-                azim=azim,
-                proj_type="ortho" if use_ortho else "persp",
-                keep_aspect=keep_aspect,
-                center_crop=center_crop_viz,
-                save_path=tmp.name,
-            )
-            pdf_paths.append(pdf_path)
-
-        else:
-            out_frame = draw_trajectories_on_frame(
-                torch.from_numpy(inputs.image) / 255.0,
-                pred_track[:n_vis_tracks].cpu(),
-            )
-            tmp = tempfile.NamedTemporaryFile(suffix=".pdf", delete=False)
-            tmp.close()
-            pdf_paths.append(tmp.name)
-            pil = Image.fromarray(out_frame)
-            pil.save(tmp.name, "PDF", resolution=300)
+        out_frame = draw_trajectories_on_frame(
+            torch.from_numpy(inputs.image) / 255.0,
+            pred_track[:n_vis_tracks].cpu(),
+        )
+        tmp = tempfile.NamedTemporaryFile(suffix=".pdf", delete=False)
+        tmp.close()
+        pdf_paths.append(tmp.name)
+        pil = Image.fromarray(out_frame)
+        pil.save(tmp.name, "PDF", resolution=300)
 
         out_frames.append(out_frame)
+        track_video_frames, track_video_fps = render_track_video(
+            inputs.image,
+            pred_track[:n_vis_tracks].cpu(),
+        )
+        out_videos.append(track_video_frames)
 
     out_video = None
+    if out_videos:
+        tiled_video = [
+            np.concatenate([video_frames[frame_idx] for video_frames in out_videos], axis=1)
+            for frame_idx in range(len(out_videos[0]))
+        ]
+        tmpfile = tempfile.NamedTemporaryFile(suffix=".mp4", delete=False)
+        imageio.mimwrite(tmpfile.name, tiled_video, format="mp4", fps=track_video_fps)
+        out_video = tmpfile.name
+
     if decode_grid:
         H = W = int(math.sqrt(n_decoder_tracks))
 
@@ -661,10 +505,6 @@ def predict(
 
         out_video = tmpfile.name
     return [np.concatenate(out_frames, axis=1), *pdf_paths, out_video]
-    # if use_3d_viz:
-    #     return [np.concatenate(out_frames, axis=1), *pdf_paths, out_video]
-    # else:
-    #     return [np.concatenate(out_frames, axis=1), *out_frames, out_video]
 
 
 def load_video(
@@ -713,16 +553,12 @@ def load_video(
 
 def demo(
     device: str = "cuda",
-    compile: bool = False,  # Faster inference, at the cost of compilation time whenever a prediction config is first encountered
-    warmup_compiled_paths: bool = False,
-    # Gradio settings
+    compile: bool = False,
     share: bool = False,
     server_name: str = "0.0.0.0",
     server_port: int = 55555,
     video_pexel_dir="/export/scratch/ra49veb/cvpr-2026/track-ae/wan_samples_2",
     video_davis_dir="/export/group/datasets/DAVIS/videos",
-    # Profiler
-    profile: bool = False,
 ):
     with gr.Blocks() as demo:
         gr.Markdown("## Motion Spaces Demo")
@@ -751,7 +587,8 @@ def demo(
         model.to(device)
         model.requires_grad_(False)
 
-        # model.use_compile = compile
+        if compile:
+            model._predict_velocity = torch.compile(model._predict_velocity, fullgraph=True)
 
         gr_model = gr.State(ModelState(model=model, device=torch.device(device)))
 
@@ -893,11 +730,6 @@ def demo(
                     n_decoder_tracks = gr.Number(label="Number of Decoder Tracks", value=80, precision=0, minimum=1)
                     n_vis_tracks = gr.Number(label="Number of Visualization Tracks", value=80, precision=0, minimum=1)
                     decode_grid = gr.Checkbox(label="Use Decoding Grid", value=False)
-                    use_3d_viz = gr.Checkbox(label="Use 3D Visualization (Slow!!)", value=False)
-                    keep_aspect_ratio = gr.Checkbox(label="Keep aspect ratio", value=False)
-                    center_crop_viz = gr.Checkbox(label="Center crop visualization", value=True)
-                    azim = gr.Slider(label="3D Viz Azimuth", minimum=0, maximum=90, step=1, value=75)
-                    use_ortho = gr.Checkbox(label="Use Orthographic Projection for 3D Viz", value=False)
                     seed = gr.Slider(label="Random Seed", minimum=0, maximum=2**32 - 1, step=1, value=42)
 
                 predict_button.click(
@@ -910,11 +742,6 @@ def demo(
                         n_decoder_tracks,
                         decode_grid,
                         seed,
-                        use_3d_viz,
-                        azim,
-                        use_ortho,
-                        keep_aspect_ratio,
-                        center_crop_viz,
                     ],
                     outputs=[
                         image_output,
