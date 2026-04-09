@@ -30,15 +30,19 @@ def train(
     load_checkpoint: str | None = None,
     checkpoint_freq: int = 10_000,
     max_steps: int = 1_000_000,
-    warmup_steps: int = 100_000,
+    warmup_steps: int = 1_000,
     # Data
     train_data_tar_base: str = "/export/group/datasets/koala-tapnext-subset",
+    val_data_tar_base: str = "/export/group/datasets/koala-tapnext-subset",
     # Training
     local_batch_size: int = 16,
     lr: float = 1e-4,
     clip_grad_norm: float = 1.0,
     precision: torch.dtype = torch.bfloat16,
     unlock_img_embedder: bool = False,
+    # Validation
+    val_freq: int = 1_000,
+    max_val_steps: int = 16,
     # Misc
     compile: bool = False,
     enable_wandb: bool = True,
@@ -112,7 +116,10 @@ def train(
     # Important setup stuff
     # If you want to change anything about what you train, you'll likely want to do it here and add it as a parameter to train()
     model: TrackVAE = TrackVAE(unlock_img_embedder=unlock_img_embedder).to(device)
-    data = TrackerDataModule(train=dict(shards=[train_data_tar_base], batch_size=local_batch_size, num_workers=16))
+    data = TrackerDataModule(
+        train=dict(shards=[train_data_tar_base], batch_size=local_batch_size, num_workers=16),
+        validation=dict(shards=[val_data_tar_base], batch_size=local_batch_size, num_workers=4),
+    )
     optimizer = torch.optim.AdamW(model.parameters(), lr=lr, betas=(0.9, 0.99), fused=compile)
     scheduler = torch.optim.lr_scheduler.SequentialLR(
         optimizer,
@@ -213,6 +220,16 @@ def train(
             ckpt_dir.mkdir(parents=True, exist_ok=True)
             torch.save(checkpoint, ckpt_dir / f"checkpoint_{start_step + i:07}.pt")
             rank0logger.info(f"Saved checkpoint at step {start_step + i}.")
+
+        if done or (i % val_freq == 0):
+            if hasattr(model, "validate"):
+                model.validate(
+                    data.val_dataloader(),
+                    global_rank=rank,
+                    train_step=start_step + i,
+                    max_steps=max_val_steps,
+                    device=device,
+                )
 
         if done:
             break

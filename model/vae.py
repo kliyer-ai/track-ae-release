@@ -1,9 +1,13 @@
+from collections import defaultdict
 from dataclasses import dataclass
 
 import einops
 import torch
+import torch.distributed as dist
+import wandb
 from jaxtyping import Float
 from torch import nn
+from tqdm import tqdm
 
 from model.blocks import InputMLP, Level, OutputMLP, TransformerLayer
 from model.dino import MinDino
@@ -566,3 +570,95 @@ class TrackVAE(nn.Module):
         }
 
         return loss_dict, metrics
+
+    @torch.no_grad()
+    def validate(
+        self,
+        dataloader_val,
+        train_step: int,
+        global_rank: int,
+        max_steps: int | None,
+        device,
+    ) -> None:
+        metrics_dict = defaultdict(list)
+
+        for i, val_batch in enumerate(tqdm(dataloader_val, desc=f"Rank {global_rank} Validating", total=max_steps)):
+            if max_steps is not None and i >= max_steps:
+                break
+
+            tracks_enc_yx = val_batch["tracks_enc_yx"].to(device=device)
+            tracks_dec_yx = val_batch["tracks_dec_yx"].to(device=device)
+            start_frame = val_batch["start_frame"].to(device=device)
+
+            pred_tracks_yx, _, _, _, _ = self.roundtrip(
+                tracks_enc_yx=tracks_enc_yx,
+                start_frame=start_frame,
+                tracks_dec_yx=tracks_dec_yx,
+            )
+
+            l1 = torch.nn.functional.l1_loss(pred_tracks_yx, tracks_dec_yx)
+            l2 = torch.nn.functional.mse_loss(pred_tracks_yx, tracks_dec_yx)
+            pck_metrics = calculate_pck(tracks_dec_yx, pred_tracks_yx)
+            mean_pck = torch.mean(torch.stack(list(pck_metrics.values())))
+
+            metrics_dict["Val/L1"].append(l1)
+            metrics_dict["Val/L2"].append(l2)
+            for threshold, pck_value in pck_metrics.items():
+                metrics_dict[f"Val/PCK@{threshold}"].append(pck_value)
+            metrics_dict["Val/PCK@Mean"].append(mean_pck)
+
+        if not metrics_dict:
+            return
+
+        metric_names = sorted(metrics_dict.keys())
+        avg_metrics = torch.stack([torch.stack(metrics_dict[name]).mean() for name in metric_names])
+
+        if dist.is_initialized():
+            dist.all_reduce(avg_metrics)
+            avg_metrics = avg_metrics / dist.get_world_size()
+
+        if global_rank == 0:
+            wandb.log({name: avg_metrics[idx].item() for idx, name in enumerate(metric_names)}, step=train_step)
+
+
+def calculate_pck(
+    gt_yx: Float[torch.Tensor, "B N T 2"],
+    pred_yx: Float[torch.Tensor, "B N T 2"],
+    thresholds: list[float] = [1, 2, 4, 8, 16],  # this is relative to to the eval space resolution
+    pck_eval_space: tuple[int, int] = (256, 256),  # this is the tap next resolution
+) -> dict[str, torch.Tensor]:
+    """
+    Calculate Percentage of Correct Keypoints (PCK) for trajectory prediction.
+
+    Args:
+        gt_tracks: Ground truth tracks in normalized coordinates [-1, 1]
+        pred_tracks: Predicted tracks in normalized coordinates [-1, 1]
+        thresholds: List of distance thresholds for PCK calculation (in normalized coordinates)
+
+    Returns:
+        Dictionary mapping threshold to PCK value
+    """
+
+    # convert normalized coordinates [-1, 1] to pixel space [0, H-1] / [0, W-1]
+    H, W = pck_eval_space
+    scale = torch.tensor([H - 1, W - 1], device=gt_yx.device, dtype=gt_yx.dtype)
+    gt_yx = (gt_yx + 1) / 2 * scale
+    pred_yx = (pred_yx + 1) / 2 * scale
+
+    # Calculate L2 distance between predicted and ground truth points
+    distances = torch.norm(pred_yx - gt_yx, dim=-1)  # [B, N, T]
+
+    pck_results = {}
+    for threshold in thresholds:
+        # Count points within threshold
+        correct_points = (distances <= threshold).float()
+        # Calculate percentage of correct points
+        pck: torch.Tensor = correct_points.mean()
+        if isinstance(threshold, float):
+            pck_results[f"{threshold:.3f}"] = pck
+        elif isinstance(threshold, int):
+            pck_results[f"{threshold}px"] = pck
+        else:
+            raise ValueError("Threshold must be int or float")
+
+    return pck_results
