@@ -1,4 +1,5 @@
 import math
+from functools import partial
 
 import einops
 import torch
@@ -57,17 +58,6 @@ class FourierFeatures(nn.Module):
         return torch.cat((features.cos(), features.sin()), dim=-1)
 
 
-def _broadcast_channel_stat(stat: torch.Tensor | None, latents: torch.Tensor) -> torch.Tensor | None:
-    if stat is None:
-        return None
-    stat = stat.to(device=latents.device)
-    if stat.ndim == 0:
-        return stat.view(1, 1, 1)
-    if stat.ndim == 1:
-        return stat.view(1, 1, -1)
-    raise ValueError(f"Expected scalar or per-channel stat, got shape {tuple(stat.shape)}")
-
-
 class TrackFM(nn.Module):
     """
     Clean generator implementation for the released `traj_gen_v2` model.
@@ -82,6 +72,8 @@ class TrackFM(nn.Module):
 
     def __init__(
         self,
+        n_cond: int,
+        poisson_rate: float | None,
         vae: TrackVAE,
         depth: int = 24,
         width: int = 1024,
@@ -89,8 +81,6 @@ class TrackFM(nn.Module):
         d_cond_norm: int = 256,
         vae_shift: float = -0.175,
         vae_scale: float = 11.6,
-        n_cond: int = 8,
-        poisson_rate: float = 2.5,
     ):
         super().__init__()
 
@@ -104,11 +94,11 @@ class TrackFM(nn.Module):
         self.grid_size = (1, 16, 16)
         self.latent_dim = 16
         self.n_cond = n_cond
-        self.poisson_rate = float(poisson_rate)
+        self.poisson_rate = float(poisson_rate) if poisson_rate is not None else None
         self.cfg_scale = float(1)
 
         self.img_embedder = MinDino("dinov2_vitb14_reg", out="features", requires_grad=False)
-        self.track_cond_emb = InputMLP(in_features=3, dim=d_cross, random_fourier=True, theta=10.0 * math.pi)
+        self.track_cond_emb = InputMLP(in_features=3, dim=d_cross, random_fourier=True, theta=10.0 * 3.14)
         self.time_emb = FourierFeatures(1, 256)
         self.time_in_proj = nn.Linear(256, 256, bias=False)
         self.mapping = MappingNetwork(depth=2, width=256, d_ff=768)
@@ -120,6 +110,8 @@ class TrackFM(nn.Module):
                     d_model=width,
                     d_cross=d_cross,
                     d_cond_norm=d_cond_norm,
+                    self_rope_mode="3d_10",
+                    cross_rope_mode="3d_10",
                 )
                 for _ in range(depth)
             ]
@@ -133,8 +125,11 @@ class TrackFM(nn.Module):
 
         self.learnable_emb_dino = nn.Parameter(torch.randn(d_cross) * 0.02)
 
-        self.vae_shift = torch.tensor(vae_shift)
-        self.vae_scale = torch.tensor(vae_scale)
+        self.vae_shift = torch.tensor(vae_shift, dtype=torch.float64)
+        self.vae_scale = torch.tensor(vae_scale, dtype=torch.float64)
+
+        print(f"{self.vae_scale=}", flush=True)
+        print(f"{self.vae_shift=}", flush=True)
 
     def get_pos(self, x: Float[torch.Tensor, "b l c"]) -> Float[torch.Tensor, "b l 3"]:
         batch_size = x.shape[0]
@@ -195,12 +190,41 @@ class TrackFM(nn.Module):
             dim=-1,
         )
 
-        if self.training:
+        if self.training and self.poisson_rate is not None:
+            # drop out some tracks
             n_drop = torch.poisson(torch.full((batch_size,), self.poisson_rate, device=start_cond.device))
             n_drop = n_drop.clamp(0, num_cond).long()
             keep_mask = torch.arange(num_cond, device=start_cond.device)[None] < (num_cond - n_drop[:, None])
             track_cond_emb = track_cond_emb * keep_mask[..., None]
             pos_cross = pos_cross * keep_mask[..., None]
+
+        if not self.training and self.poisson_rate is not None:
+            # support padding if the model was trained on dropped pokes
+            n_pad = self.n_cond - num_cond
+            track_cond_emb = torch.cat(
+                [
+                    track_cond_emb,
+                    torch.zeros(
+                        batch_size,
+                        n_pad,
+                        track_cond_emb.shape[-1],
+                        device=track_cond_emb.device,
+                        dtype=track_cond_emb.dtype,
+                    ),
+                ],
+                dim=1,
+            )
+            pos_cross = torch.cat(
+                [
+                    pos_cross,
+                    torch.zeros(batch_size, n_pad, 3, device=pos_cross.device, dtype=pos_cross.dtype),
+                ],
+                dim=1,
+            )
+
+        assert track_cond_emb.shape[1] == self.n_cond, (
+            f"Expected track_cond_emb with {self.n_cond} tokens, got {track_cond_emb.shape[1]}"
+        )
 
         return {
             "extra_tokens": start_embed,
@@ -248,25 +272,30 @@ class TrackFM(nn.Module):
         end_time = end_t.unsqueeze(-1).float() / (num_points - 1)
         return torch.cat((start_points, end_points, end_time), dim=-1), traj_idx
 
-    def normalize_latents(self, latents: Float[torch.Tensor, "b l c"]) -> Float[torch.Tensor, "b l c"]:
-        vae_shift = _broadcast_channel_stat(self.vae_shift, latents)
-        vae_scale = _broadcast_channel_stat(self.vae_scale, latents)
+    def normalize_latents(self, latents: Float[torch.Tensor, "B N C"]) -> Float[torch.Tensor, "B N C"]:
+        """Normalize latents to zero mean and unit variance per channel using precomputed dataset statistics."""
+        dtype = latents.dtype
+        latents.to(torch.float64)
+        if self.vae_shift is not None:
+            latents = latents - self.vae_shift.to(latents.device).view(1, 1, -1)
 
-        if vae_shift is not None:
-            latents = latents - vae_shift
-        if vae_scale is not None:
-            latents = latents * (math.sqrt(0.5) / vae_scale.sqrt())
-        return latents
+        if self.vae_scale is not None:  # scale variance to 0.5
+            latents = latents * (math.sqrt(0.5) / self.vae_scale.sqrt().to(latents.device))
 
-    def denormalize_latents(self, latents: Float[torch.Tensor, "b l c"]) -> Float[torch.Tensor, "b l c"]:
-        vae_shift = _broadcast_channel_stat(self.vae_shift, latents)
-        vae_scale = _broadcast_channel_stat(self.vae_scale, latents)
+        return latents.to(dtype)
 
-        if vae_scale is not None:
-            latents = latents * (vae_scale.sqrt() / math.sqrt(0.5))
-        if vae_shift is not None:
-            latents = latents + vae_shift
-        return latents
+    def denormalize_latents(self, latents: Float[torch.Tensor, "B N C"]) -> Float[torch.Tensor, "B N C"]:
+        """Un-normalize latents to original distribution using precomputed dataset statistics."""
+        dtype = latents.dtype
+        latents.to(torch.float64)
+
+        if self.vae_scale is not None:
+            latents = latents * (self.vae_scale.sqrt().to(latents.device) / math.sqrt(0.5))
+
+        if self.vae_shift is not None:
+            latents = latents + self.vae_shift.to(latents.device).view(1, 1, -1)
+
+        return latents.to(dtype)
 
     def _predict_velocity(self, x_t, t, static_cond):
         cond_norm = self._time_condition(t.to(x_t.dtype))
@@ -349,6 +378,10 @@ class TrackFM(nn.Module):
             points_per_track=points_per_traj,
             start_frame=start_frame,
         )
+
+
+TrackFM_FewPoke: TrackFM = partial(TrackFM, n_cond=16, poisson_rate=2.5)
+TrackFM_Dense: TrackFM = partial(TrackFM, n_cond=40, poisson_rate=None)
 
 
 class TrackFMLibero(TrackFM):
