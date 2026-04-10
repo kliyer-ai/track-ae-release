@@ -493,8 +493,7 @@ class TrackFMLibero(TrackFM):
         if start_t is None:
             raise ValueError("start_t must be provided when use_t_input=True.")
 
-        start_t_emb = self.start_t_mapping(einops.rearrange(start_t.to(cond["x_cross"].dtype), "b -> b 1 1"))
-        start_t_emb = start_t_emb.to(dtype=cond["x_cross"].dtype, device=cond["x_cross"].device)
+        start_t_emb = self.start_t_mapping(einops.rearrange(start_t, "b -> b 1 1"))
         cond["x_cross"] = torch.cat((cond["x_cross"], start_t_emb), dim=1)
 
         return cond

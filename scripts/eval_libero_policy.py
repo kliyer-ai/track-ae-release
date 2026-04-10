@@ -1,11 +1,13 @@
 import argparse
 import math
 import os
+from datetime import timedelta
 from pathlib import Path
 
 import numpy as np
 import torch
 from accelerate import Accelerator
+from accelerate.utils import InitProcessGroupKwargs, gather_object
 from einops import rearrange
 from omegaconf import OmegaConf
 from safetensors.torch import load_file
@@ -13,7 +15,12 @@ from tqdm.auto import tqdm
 
 from model.policy_head import PolicyHead
 from utils.libero_utils import build_libero_env
-from utils.libero_utils.viz import make_grid_video_from_numpy, render_done_to_boundary, video_pad_time
+from utils.libero_utils.viz import (
+    combine_track_and_img,
+    make_grid_video_from_numpy,
+    render_done_to_boundary,
+    video_pad_time,
+)
 
 
 def parse_args():
@@ -25,6 +32,7 @@ def parse_args():
     parser.add_argument("--vec_env_num", type=int, default=10, help="Number of parallel environments.")
     parser.add_argument("--track_pred_nfe", type=int, default=10)
     parser.add_argument("--cfg_scale", type=float, default=1.0)
+    parser.add_argument("--vis_tracks", action="store_true")
     parser.add_argument("--img_size", type=int, default=128)
     parser.add_argument("--rollout_horizon", type=int, default=600)
     parser.add_argument("--mix_precision", action="store_true")
@@ -112,7 +120,7 @@ def rollout_env(
                 step_task_emb = np.repeat(step_task_emb[None, :], rgb.shape[0], axis=0)
 
             extra_states = {k: obs[obs_key_mapping[k]] for k in policy_ref.extra_state_keys}
-            action, _ = policy_ref.act(rgb, step_task_emb, extra_states)
+            action, track_vis = policy_ref.act(rgb, step_task_emb, extra_states)
             obs, r, done, info = env.step(action)
 
             reward += np.asarray(r, dtype=np.float32)
@@ -127,6 +135,13 @@ def rollout_env(
                 )
 
             video_img = rearrange(rgb.copy(), "b v h w c -> b v c h w")
+            if track_vis is not None:
+                _, vis_tracks = track_vis
+                for view_idx in range(video_img.shape[1]):
+                    video_img[:, view_idx] = combine_track_and_img(
+                        track=vis_tracks[:, view_idx],
+                        vid=video_img[:, view_idx],
+                    )
             b, _, c, h, _ = video_img.shape
             frame = np.concatenate(
                 [video_img[:, 0], np.ones((b, c, h, 2), dtype=np.uint8) * 255, video_img[:, 1]],
@@ -160,14 +175,26 @@ def rollout_env(
 
 
 def evaluate(accelerator: Accelerator, args, video_save_dir: str):
-    model = PolicyHead(track_pred_nfe=args.track_pred_nfe, track_pred_cfg=args.cfg_scale)
-    model.load_state_dict(load_file(args.ckpt_path, device="cpu"))
+    state_dict = load_file(args.ckpt_path, device="cpu")
+    use_t_input = PolicyHead.checkpoint_uses_t_input(state_dict)
+    print(
+        f"Auto-detected track predictor `use_t_input={use_t_input}` from checkpoint keys.",
+        flush=True,
+    )
+
+    model = PolicyHead(
+        track_pred_nfe=args.track_pred_nfe,
+        track_pred_cfg=args.cfg_scale,
+        vis_tracks=args.vis_tracks,
+        track_predictor_use_t_input=use_t_input,
+    )
+    model.load_state_dict(state_dict)
     model = accelerator.prepare(model)
 
     os.makedirs(video_save_dir, exist_ok=True)
 
-    suite_dir = os.path.join(args.amplify_libero_path, "init_files", args.suite)
-    total_envs = len(sorted(os.listdir(suite_dir)))
+    suite_dir = Path(args.amplify_libero_path) / "init_files" / args.suite
+    total_envs = len(sorted(suite_dir.glob("*.pruned_init")))
 
     world_size = accelerator.num_processes
     rank = accelerator.process_index
@@ -229,22 +256,42 @@ def evaluate(accelerator: Accelerator, args, video_save_dir: str):
 def main():
     args = parse_args()
     print(f"Starting evaluation for checkpoint: {args.ckpt_path}", flush=True)
+    print(
+        "Eval config: "
+        f"suite={args.suite}, track_pred_nfe={args.track_pred_nfe}, cfg_scale={args.cfg_scale}, "
+        f"img_size={args.img_size}, mix_precision={args.mix_precision}, vis_tracks={args.vis_tracks}, "
+        f"num_env_rollouts={args.num_env_rollouts}, vec_env_num={args.vec_env_num}",
+        flush=True,
+    )
 
     eval_result_dir = os.path.join(args.save_path, "eval_results")
     video_save_dir = os.path.join(eval_result_dir, f"video_{args.suite}", "ours")
     os.makedirs(eval_result_dir, exist_ok=True)
 
-    accelerator = Accelerator(mixed_precision="bf16" if args.mix_precision else "no", cpu=False)
+    # Env runtimes can vary a lot across ranks (e.g. hard tasks taking full horizon).
+    # Use a longer distributed timeout so fast ranks don't fail while waiting for slow ranks.
+    process_group_kwargs = InitProcessGroupKwargs(timeout=timedelta(hours=2))
+    accelerator = Accelerator(
+        mixed_precision="bf16" if args.mix_precision else "no",
+        cpu=False,
+        kwargs_handlers=[process_group_kwargs],
+    )
     local_results = evaluate(accelerator=accelerator, args=args, video_save_dir=video_save_dir)
 
-    accelerator.wait_for_everyone()
-    gathered_results = accelerator.gather_object(local_results) if accelerator.num_processes > 1 else [local_results]
+    # `accelerate.utils.gather_object` flattens one nesting level, so wrap payload in a list.
+    gathered_results = gather_object([local_results]) if accelerator.num_processes > 1 else [local_results]
 
     if accelerator.is_main_process:
         merged = merge_results(gathered_results)
         success_rates = {k: v for k, v in merged.items() if k.startswith("rollout/success_env")}
+        summary_sep = "=" * 50
+        print(summary_sep, flush=True)
+        print("FINAL EVAL SUMMARY", flush=True)
+        print(f"Suite: {args.suite}", flush=True)
+        print(f"Checkpoint: {args.ckpt_path}", flush=True)
         print(f"Success rates: {success_rates}", flush=True)
         print(f"Mean success rate: {merged['rollout/success_env_avg']:.4f}", flush=True)
+        print(summary_sep, flush=True)
 
 
 if __name__ == "__main__":

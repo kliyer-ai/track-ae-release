@@ -1,6 +1,7 @@
 import math
 import torch
 
+from collections.abc import Mapping
 from model.blocks import Level, TransformerLayer, SimpleProj, SimpleProjIn
 from model.gen import TrackFMLibero
 from model.rope import make_axial_pos_2d
@@ -13,6 +14,13 @@ from utils.libero_utils.viz import sample_grid
 
 
 class PolicyHead(nn.Module):
+    @staticmethod
+    def checkpoint_uses_t_input(state_dict: Mapping[str, torch.Tensor]) -> bool:
+        return any(
+            key.startswith("track_predictor.start_t_mapping") or ".track_predictor.start_t_mapping" in key
+            for key in state_dict
+        )
+
     def __init__(
         self,
         temp_disc_fac: float = 0.99,
@@ -24,17 +32,28 @@ class PolicyHead(nn.Module):
         track_emb_dim: int = 16,
         model_dim: int = 768,
         depth: int = 6,
+        track_predictor_use_t_input: bool = False,
+        compile_track_predictor: bool = False,
+        compile_vae_decode: bool = False,
         **kwargs,
     ) -> None:
         super().__init__()
 
         track_ae = TrackVAE()  # TODO init properly
-        self.track_predictor = TrackFMLibero(vae=track_ae)
+        self.track_predictor = TrackFMLibero(vae=track_ae, use_t_input=track_predictor_use_t_input)
 
         self.vis_tracks = vis_tracks
-        if self.vis_tracks:  # also compile decoder for faster decoding during rollout visualization
-            self.track_predictor.ae.decode = torch.compile(
-                self.track_predictor.ae.decode, mode="reduce-overhead", dynamic=True
+
+        if compile_track_predictor:
+            self.track_predictor.backbone.forward = torch.compile(
+                self.track_predictor.backbone.forward,
+                mode="default",
+                dynamic=True,
+            )
+
+        if self.vis_tracks and compile_vae_decode:  # optional compile for faster rollout visualization
+            self.track_predictor.vae.decode = torch.compile(
+                self.track_predictor.vae.decode, mode="reduce-overhead", dynamic=True
             )
 
         self.track_predictor.cfg_scale = track_pred_cfg
@@ -277,6 +296,7 @@ class PolicyHead(nn.Module):
                 latent
             )  # Unnormalize and un-center generated latents
 
+            # we use an 8x8 grid for viz
             grid_points = sample_grid(
                 8,
                 device=track_pred.device,
@@ -301,7 +321,7 @@ class PolicyHead(nn.Module):
             query_pos = (repeat(grid_points, "n c -> b_new n c", b_new=B * V) - 0.5) * 2  # scale to [-1, 1]
 
             with torch.autocast(device_type=track_pred.device.type, dtype=torch.bfloat16):
-                decoded_tracks = self.track_predictor.ae.decode(
+                decoded_tracks = self.track_predictor.vae.decode(
                     latents=latent_denorm,
                     query_pos=query_pos,
                     points_per_track=64,
@@ -311,6 +331,7 @@ class PolicyHead(nn.Module):
                 decoded_tracks = (decoded_tracks + 1) / 2  # map back to [0, 1]
 
                 vis_tracks = decoded_tracks[:, :, ::4, :].flip(-1)  # yx to xy, subsample from 64 to 16
+                vis_tracks = vis_tracks[:, :64, :]  # only visualize first 64 points (8x8 grid) to avoid clutter
                 vis_tracks = rearrange(vis_tracks, "(b v) n t_frames c -> b v t_frames n c", v=V, b=B)
 
                 track_vis = (None, vis_tracks)
