@@ -23,7 +23,7 @@ from PIL import Image, ImageDraw
 from torchvision.transforms.functional import resize
 from torchvision.utils import flow_to_image
 
-from model.gen import TrackFM
+from model.gen import TrackFM, TrackFM_FewPoke
 from model.rope import make_axial_pos_2d
 from model.vae import TrackVAE
 
@@ -572,26 +572,9 @@ def demo(
         gr.Markdown("## Motion Spaces Demo")
 
         vae = TrackVAE()
-        model = TrackFM(vae=vae, vae_shift=-0.17, vae_scale=12.0)
-
-        sd = torch.load(
-            # "/export/scratch/ra49veb/checkpoints/track-project/327613-n16-endt-unlock-repro-actually-rebalanced/checkpoints/step-650000/model.pt"
-            "/export/scratch/ra49veb/checkpoints/track-project/168292-n16-endt-fixed/checkpoints/step-700000/model.pt"
-        )
-
-        sd = {
-            k.replace(".mid_level.", ".")
-            .replace("unet", "backbone")
-            .replace("ae", "vae")
-            .replace("backbone.mid_merge", "in_proj")
-            .replace("extra_proj", "cond_proj")
-            .replace("backbone.mid_split", "out_proj"): v
-            for k, v in sd.items()
-            if "dummy_query_pos" not in k
-        }
-
+        model = TrackFM_FewPoke(vae=vae)
+        sd = torch.load("./checkpoints/track_gen_sparse.pt")
         model.load_state_dict(sd)
-
         model.eval()
         model.to(device)
         model.requires_grad_(False)

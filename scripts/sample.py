@@ -37,9 +37,8 @@ def concatenate_images_horizontally(images: list[Image.Image]) -> Image.Image:
 
 def main(
     samples_path=Path("/export/scratch/ra49veb/cvpr-2026/track-ae/wan_samples_2"),
-    model_path=Path("./checkpoints/track_gen_ema.pt"),
     output_path=Path("./outputs/evals"),
-    gt_path=Path("./data/gt_tracks.pt"),  # this really is the correct GT!
+    gt_path="./data/gt_tracks.pt",
     mode: Literal["few_poke", "dense"] = "few_poke",
     cfg_scale: float = 1.0,
     K: int = 8,
@@ -57,13 +56,16 @@ def main(
 
     vae = TrackVAE()
     if mode == "few_poke":
-        model = TrackFM_FewPoke(vae=vae)
         output_path = output_path / f"few_poke-cfg{cfg_scale}-seed{seed}"
+        model = TrackFM_FewPoke(vae=vae)
+        model_path = "./checkpoints/track_gen_sparse.pt"
     elif mode == "dense":
-        model = TrackFM_Dense(vae=vae)
         output_path = output_path / f"dense-cfg{cfg_scale}-seed{seed}"
+        model = TrackFM_Dense(vae=vae)
+        model_path = "./checkpoints/track_gen_dense.pt"
+
     model.eval()
-    model.load_state_dict(torch.load(str(model_path), map_location="cpu"), strict=True)
+    model.load_state_dict(torch.load(model_path, map_location="cpu"), strict=True)
 
     model = model.to(device="cuda", dtype=torch.bfloat16)
     model.cfg_scale = cfg_scale
@@ -78,10 +80,7 @@ def main(
         assert n_gt_tracks == 40, f"Expected 40 GT tracks, but got {n_gt_tracks} for video {video_name}"
 
         video_path = samples_path / f"original-{video_name}.mp4"
-        # video_path = samples_path / f"{video_name}.mp4"
         video, _, _ = torchvision.io.read_video(str(video_path), pts_unit="sec")  # (T, H, W, C) in [0, 255]
-        # video = read_video_safe(str(video_path))  # (T, H, W, C) in [0, 255]
-        # video = read_video_safe(str(video_path))  # (T, H, W, C) in [0, 255]
         start_frame = video[0].float() / 255.0  # [H, W, C] in [0, 1]
         start_frame = start_frame * 2 - 1  # in [-1, 1]
         H, W = start_frame.shape[:2]
@@ -115,7 +114,6 @@ def main(
             }
             generator = torch.Generator(device="cuda").manual_seed(seed)
             z = torch.randn(K, 16 * 16, 16, device="cuda", dtype=torch.bfloat16, generator=generator)
-            print(z)
 
             viz_poke_tracks = (
                 gt_tracks[:n_pokes].mul(0.5).add(0.5)
