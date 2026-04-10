@@ -1,6 +1,7 @@
 import argparse
 import math
 import os
+import sys
 from datetime import timedelta
 from pathlib import Path
 
@@ -12,6 +13,12 @@ from einops import rearrange
 from omegaconf import OmegaConf
 from safetensors.torch import load_file
 from tqdm.auto import tqdm
+
+# Ensure repository root is importable when invoking
+# `python scripts/eval_libero_policy.py` without setting PYTHONPATH.
+REPO_ROOT = Path(__file__).resolve().parents[1]
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
 
 from model.policy_head import PolicyHead
 from utils.libero_utils import build_libero_env
@@ -35,9 +42,8 @@ def parse_args():
     parser.add_argument("--vis_tracks", action="store_true")
     parser.add_argument("--img_size", type=int, default=128)
     parser.add_argument("--rollout_horizon", type=int, default=600)
-    parser.add_argument("--mix_precision", action="store_true")
     parser.add_argument(
-        "--amplify_libero_path",
+        "--libero_path",
         type=str,
         default=str(Path(__file__).resolve().parents[1] / "LIBERO" / "libero" / "libero"),
     )
@@ -193,7 +199,7 @@ def evaluate(accelerator: Accelerator, args, video_save_dir: str):
 
     os.makedirs(video_save_dir, exist_ok=True)
 
-    suite_dir = Path(args.amplify_libero_path) / "init_files" / args.suite
+    suite_dir = Path(args.libero_path) / "init_files" / args.suite
     total_envs = len(sorted(suite_dir.glob("*.pruned_init")))
 
     world_size = accelerator.num_processes
@@ -217,7 +223,7 @@ def evaluate(accelerator: Accelerator, args, video_save_dir: str):
                 "action_dim": 7,
                 "n_envs": args.vec_env_num,
                 "dataset_path": args.dataset_path,
-                "libero_path": args.amplify_libero_path,
+                "libero_path": args.libero_path,
                 "task_emb_cache_path": args.task_emb_cache_path,
             }
         )
@@ -259,7 +265,7 @@ def main():
     print(
         "Eval config: "
         f"suite={args.suite}, track_pred_nfe={args.track_pred_nfe}, cfg_scale={args.cfg_scale}, "
-        f"img_size={args.img_size}, mix_precision={args.mix_precision}, vis_tracks={args.vis_tracks}, "
+        f"img_size={args.img_size}, mixed_precision=bf16, vis_tracks={args.vis_tracks}, "
         f"num_env_rollouts={args.num_env_rollouts}, vec_env_num={args.vec_env_num}",
         flush=True,
     )
@@ -272,7 +278,7 @@ def main():
     # Use a longer distributed timeout so fast ranks don't fail while waiting for slow ranks.
     process_group_kwargs = InitProcessGroupKwargs(timeout=timedelta(hours=2))
     accelerator = Accelerator(
-        mixed_precision="bf16" if args.mix_precision else "no",
+        mixed_precision="bf16",
         cpu=False,
         kwargs_handlers=[process_group_kwargs],
     )
