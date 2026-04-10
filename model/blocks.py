@@ -96,7 +96,7 @@ class SelfAttentionBlock(nn.Module):
         d_model: int,
         d_cond_norm: int | None = None,
         d_head: int = 64,
-        rope_mode: Literal["1d", "2d", "3d"] = "3d",
+        rope_mode: Literal["1d", "2d", "3d_10", "3d_40"] = "3d_40",
     ):
         super().__init__()
         self.d_head = d_head
@@ -107,8 +107,10 @@ class SelfAttentionBlock(nn.Module):
         self.scale = nn.Parameter(torch.full([self.n_heads], 10.0))
         self.out_proj = zero_init(nn.Linear(d_model, d_model, bias=False))
         self.eps = 1e-6
-        if rope_mode == "3d":
+        if rope_mode == "3d_40":
             self.pos_emb = AxialRoPE3D(d_head, self.n_heads)
+        elif rope_mode == "3d_10":
+            self.pos_emb = AxialRoPE3D(d_head, self.n_heads, yx_max_theta=10.0 * 3.14)
         elif rope_mode == "2d":
             self.pos_emb = AxialRoPE2D(d_head, self.n_heads)
         elif rope_mode == "1d":
@@ -143,7 +145,7 @@ class CrossAttentionBlock(nn.Module):
         d_cross: int,
         d_cond_norm: int | None = None,
         d_head: int = 64,
-        rope_mode: Literal["none", "1d", "2d", "3d"] = "3d",
+        rope_mode: Literal["none", "1d", "2d", "3d_10", "3d_40"] = "3d_40",
     ):
         super().__init__()
         self.d_head = d_head
@@ -156,8 +158,10 @@ class CrossAttentionBlock(nn.Module):
         self.scale = nn.Parameter(torch.full([self.n_heads], 10.0))
         self.out_proj = zero_init(nn.Linear(d_model, d_model, bias=False))
         self.eps = 1e-6
-        if rope_mode == "3d":
+        if rope_mode == "3d_40":
             self.pos_emb = AxialRoPE3D(d_head, self.n_heads)
+        elif rope_mode == "3d_10":
+            self.pos_emb = AxialRoPE3D(d_head, self.n_heads, yx_max_theta=10.0 * 3.14)
         elif rope_mode == "2d":
             self.pos_emb = AxialRoPE2D(d_head, self.n_heads)
         elif rope_mode == "1d":
@@ -201,8 +205,8 @@ class TransformerLayer(nn.Module):
         d_cond_norm: int | None = None,
         d_head=64,
         ff_expand=3,
-        self_rope_mode: Literal["1d", "2d", "3d"] = "3d",
-        cross_rope_mode: Literal["none", "1d", "2d", "3d"] | None = None,
+        self_rope_mode: Literal["1d", "2d", "3d_10", "3d_40"] = "3d_40",
+        cross_rope_mode: Literal["none", "1d", "2d", "3d_10", "3d_40"] | None = None,
         use_ca: bool = True,
     ):
         super().__init__()

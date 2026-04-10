@@ -142,7 +142,6 @@ class TrajRegressorDecoderMAE(nn.Module):
         depth: int = 12,
         latent_dim: int = 16,
         img_feat_size=(16, 16),
-        relative_time: bool = True,
         criterion: nn.Module = nn.L1Loss(),
     ):
         super().__init__()
@@ -151,11 +150,10 @@ class TrajRegressorDecoderMAE(nn.Module):
         self.trajs_out = OutputMLP(d_model, 2)
         self.decode_token = nn.Parameter(torch.randn(1, 1, d_model))
         self.latents_in = nn.Linear(latent_dim, d_model)
-        self.relative_time = relative_time
         self.criterion = criterion
 
         H, W = img_feat_size
-        time_cross = 1
+        time_cross = -1.0
         pos_cross = torch.cat([torch.full((H * W, 1), time_cross), make_axial_pos_2d(H, W)], dim=-1)
         self.register_buffer("pos_cross", pos_cross)  # [1, n_tokens, 3]
 
@@ -189,10 +187,7 @@ class TrajRegressorDecoderMAE(nn.Module):
     ) -> Float[torch.Tensor, "B (N T) c"]:
         B = latents.shape[0]
         # create temporal positions
-        if self.relative_time:
-            t_pos = centers(-1, 1, points_per_traj, device=latents.device)
-        else:
-            t_pos = torch.arange(0, points_per_traj, device=latents.device)
+        t_pos = centers(-1, 1, points_per_traj, device=latents.device)
         t_pos = einops.repeat(t_pos, "T -> B (N T) C", B=B, N=num_trajs, C=1)
         spatial_pos = einops.repeat(query_pos, "B N C -> B (N T) C", T=points_per_traj)  # B N*T 2
         pos = torch.cat([t_pos, spatial_pos], dim=-1)  # B ( n_emb + N*T ) 3
@@ -224,12 +219,7 @@ class TrajRegressorDecoderMAE(nn.Module):
         z = torch.cat([latents, decode_tokens], dim=1)
 
         x_cross: Float[torch.Tensor, "B (H W) C"] = start_emb  # [B (H W) C]
-        pos_cross = self.pos_cross  # [1 (H W) 3]
-        pos_cross = pos_cross.clone()
-        pos_cross[..., 0] = (
-            pos_cross[..., 0] * traj_pos[..., 0].min()
-        )  # first dim is time, smallest value is start time
-        pos_cross = pos_cross.expand(B, -1, -1)  # [B (H W) 3]
+        pos_cross = self.pos_cross.expand(B, -1, -1)  # [B (H W) 3]
         decoded_tracks = self.backbone(z, pos, x_cross=x_cross, pos_cross=pos_cross)  # B (N T) C
 
         decoded_tracks = self.trajs_out(decoded_tracks[:, -N_decode_tokens:])
@@ -302,7 +292,7 @@ class TrajEncoder(nn.Module):
         self.register_buffer("query_pos", query_pos[None])  # [1, n_latents, 3]
 
         # prepare cross attention pos encodings
-        time_cross = 1.0
+        time_cross = -1.0
         pos_cross = torch.cat([torch.full((H * W, 1), time_cross), make_axial_pos_2d(H, W)], dim=-1)
         self.register_buffer("pos_cross", pos_cross)  # [H*W, 3]
 
@@ -345,12 +335,7 @@ class TrajEncoder(nn.Module):
         # prepare Cross Attention
         if start_emb is not None:
             x_cross: Float[torch.Tensor, "B (H W) C"] = start_emb  # [B (H W) C]
-            pos_cross = self.pos_cross
-            pos_cross = pos_cross.clone()
-            pos_cross[..., 0] = (
-                pos_cross[..., 0] * token_pos[..., 0].min()
-            )  # first dim is time, smallest value is start time
-            pos_cross = pos_cross.expand(B, -1, -1)  # [B (H W) 3]
+            pos_cross = self.pos_cross.expand(B, -1, -1)  # [B (H W) 3]
             latents = self.backbone(tracks_embedded, pos, x_cross=x_cross, pos_cross=pos_cross)  # B (N T) C
         else:
             latents = self.backbone(tracks_embedded, pos)
