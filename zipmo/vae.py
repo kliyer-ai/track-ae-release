@@ -9,9 +9,9 @@ from jaxtyping import Float
 from torch import nn
 from tqdm import tqdm
 
-from model.blocks import InputMLP, Level, OutputMLP, TransformerLayer
-from model.dino import MinDino
-from model.rope import centers, make_axial_pos_2d
+from zipmo.blocks import InputMLP, Level, OutputMLP, TransformerLayer
+from zipmo.dino import MinDino
+from zipmo.rope import centers, make_axial_pos_2d
 
 
 def chunk_grid_strided(grid, chunk_size=8):
@@ -350,13 +350,13 @@ class TrajEncoder(nn.Module):
         return EncoderOutput(mean, logvar, query_pos)
 
 
-class TrackVAE(nn.Module):
+class ZipMoVAE(nn.Module):
     def __init__(
         self,
         kl_weight: float = 1e-7,
         unlock_img_embedder: bool = False,
     ):
-        super(TrackVAE, self).__init__()
+        super(ZipMoVAE, self).__init__()
 
         self.encoder = TrajEncoder()
         self.decoder = TrajRegressorDecoderMAE()

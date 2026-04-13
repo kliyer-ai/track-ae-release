@@ -19,13 +19,13 @@ import numpy as np
 import torch
 from jaxtyping import UInt8
 from matplotlib.patches import Circle, FancyArrowPatch, Rectangle
+from model.gen import TrackFM
+from model.rope import make_axial_pos_2d
 from PIL import Image, ImageDraw
 from torchvision.transforms.functional import resize
 from torchvision.utils import flow_to_image
 
-from model.gen import TrackFM, TrackFM_FewPoke
-from model.rope import make_axial_pos_2d
-from model.vae import TrackVAE
+from zipmo.planner import ZipMoPlanner
 
 VAL_SHAPE = [256, 16]
 
@@ -583,10 +583,7 @@ def demo(
     with gr.Blocks() as demo:
         gr.Markdown("## Motion Spaces Demo")
 
-        vae = TrackVAE()
-        model = TrackFM_FewPoke(vae=vae)
-        sd = torch.load("./checkpoints/zipmo_planner_sparse.pt", weights_only=False)
-        model.load_state_dict(sd)
+        model: ZipMoPlanner = torch.hub.load("kliyer-ai/track-ae-release", "zipmo_planner_sparse")  # type: ignore
         model.eval()
         model.to(device)
         model.requires_grad_(False)

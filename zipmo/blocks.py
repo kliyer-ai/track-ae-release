@@ -8,7 +8,7 @@ import torch.nn.functional as F
 from jaxtyping import Float
 from torch import nn
 
-from model.rope import AxialRoPE1D, AxialRoPE2D, AxialRoPE3D
+from zipmo.rope import AxialRoPE1D, AxialRoPE2D, AxialRoPE3D
 
 
 def zero_init(layer):
