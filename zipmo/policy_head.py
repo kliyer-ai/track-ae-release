@@ -5,7 +5,7 @@ import torch
 from einops import rearrange, repeat
 from jaxtyping import Float, Int
 from torch import nn
-
+from functools import partial
 from utils.libero_utils.viz import sample_grid
 from zipmo.blocks import Level, SimpleProj, SimpleProjIn, TransformerLayer
 from zipmo.planner import ZipMoPlanner_Libero
@@ -356,3 +356,7 @@ class PolicyHead(nn.Module):
             track_vis = None
 
         return current_action.float().cpu().numpy(), track_vis
+
+
+PolicyHeadATM = partial(PolicyHead, track_predictor_use_t_input=False)  # type: ignore
+PolicyHeadTraMoE = partial(PolicyHead, track_predictor_use_t_input=True)  # type: ignore

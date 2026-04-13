@@ -78,11 +78,13 @@ def zipmo_planner_sparse(pretrained: bool = True, **kwargs):
 
 
 def zipmo_planner_libero(mode: Literal["atm", "tramoe"], pretrained: bool = True, **kwargs):
-    from zipmo.planner import ZipMoPlanner_Libero
+    from zipmo.planner import ZipMoPlanner_Libero_ATM, ZipMoPlanner_Libero_TraMoE
     from zipmo.vae import ZipMoVAE
 
     vae = ZipMoVAE()
-    model = ZipMoPlanner_Libero(vae=vae, **kwargs)
+    assert mode in ["atm", "tramoe"], "Mode must be either 'atm' or 'tramoe'"
+    planner_cls = ZipMoPlanner_Libero_ATM if mode == "atm" else ZipMoPlanner_Libero_TraMoE
+    model = planner_cls(vae=vae, **kwargs)
 
     name = f"zipmo_planner_libero_{mode}"
 
@@ -96,19 +98,22 @@ def zipmo_planner_libero(mode: Literal["atm", "tramoe"], pretrained: bool = True
 
 def zipmo_policy_head(
     mode: Literal["atm", "tramoe"],
-    suit: Literal["10", "goal", "object", "spatial"] | None = None,
+    suite: Literal["10", "goal", "object", "spatial"] | None = None,
     pretrained: bool = True,
     **kwargs,
 ):
-    assert mode == "atm" or suit is not None, "For TraMOE, a suit must be specified"
+    assert mode == "atm" or suite is not None, "For TraMOE, a suite must be specified"
+    assert mode in ["atm", "tramoe"], "Mode must be either 'atm' or 'tramoe'"
 
-    from zipmo.policy_head import PolicyHead
+    from zipmo.policy_head import PolicyHeadATM, PolicyHeadTraMoE
 
-    model = PolicyHead(**kwargs)
+    policy_cls = PolicyHeadATM if mode == "atm" else PolicyHeadTraMoE
+
+    model = policy_cls(**kwargs)
 
     name = f"zipmo_policy_head_{mode}"
     if mode == "tramoe":
-        name += f"_{suit}"
+        name += f"_{suite}"
 
     if pretrained:
         path = _download_safetensors(_MODEL_FILES[name])
