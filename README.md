@@ -17,7 +17,7 @@
 </div>
 <p align="center">
   <b><sup>1</sup>CompVis @ LMU Munich, <sup>2</sup>MCML, <sup>3</sup>Apple</b><br/>
-  <sup>*</sup>Equal contribution / CVPR 2026
+  CVPR 2026
 </p>
 
 <p align="center">

@@ -7,16 +7,12 @@ from safetensors.torch import load_file
 from torch.hub import get_dir
 
 dependencies = [
-    "cv2",
     "einops",
     "huggingface_hub",
     "jaxtyping",
-    "matplotlib",
-    "numpy",
     "safetensors",
     "torch",
     "tqdm",
-    "wandb",
 ]
 
 _HF_REPO_ID = "CompVis/ZipMo"
