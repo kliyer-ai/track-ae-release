@@ -314,7 +314,8 @@ def render_track_video(
         pts_valid = pts[valid]
         if len(pts_valid) < 2:
             continue
-        mean_movement = np.square(np.diff(pts_valid, axis=0)).mean()
+        step_lengths = np.linalg.norm(np.diff(pts_valid, axis=0), axis=-1)
+        mean_movement = step_lengths.mean()
         moving_track_mask[track_idx] = mean_movement >= motion_threshold
 
     def append_frame(draw_motion_until: int | None):
@@ -389,6 +390,7 @@ def predict(
     decode_grid: bool = False,
     decode_dense: bool = False,
     seed: int = 42,
+    render_videos: bool = False,
     motion_threshold: float = 1.0,
 ) -> tuple[UInt8[np.ndarray, "h w c"], None]:
     assert inputs.image is not None, "Image input is required for prediction."
@@ -451,35 +453,28 @@ def predict(
     if decode_dense:
         pred_tracks = einops.rearrange(pred_tracks, "b h w t c -> b (h w) t c")
 
-    out_frames = []
-    # Save individual frames as PDF files for Gradio File outputs.
-    pdf_paths = []
-    # Save individual videos as MP4 files for Gradio Video outputs.
     video_paths = []
+    out_frames = []
 
     for pred_track in pred_tracks:
         out_frame = draw_trajectories_on_frame(
             torch.from_numpy(inputs.image) / 255.0,
             pred_track[:n_vis_tracks].cpu(),
         )
-        tmp = tempfile.NamedTemporaryFile(suffix=".pdf", delete=False)
-        tmp.close()
-        pdf_paths.append(tmp.name)
-        pil = Image.fromarray(out_frame)
-        pil.save(tmp.name, "PDF", resolution=300)
-
         out_frames.append(out_frame)
-        track_video_frames, track_video_fps = render_track_video(
-            inputs.image,
-            pred_track[:n_vis_tracks].cpu(),
-            motion_threshold=motion_threshold,
-        )
-        tmp_video = tempfile.NamedTemporaryFile(suffix=".mp4", delete=False)
-        tmp_video.close()
-        imageio.mimwrite(tmp_video.name, track_video_frames, format="mp4", fps=track_video_fps)
-        video_paths.append(tmp_video.name)
 
-    if decode_grid:
+        if render_videos:
+            track_video_frames, track_video_fps = render_track_video(
+                inputs.image,
+                pred_track[:n_vis_tracks].cpu(),
+                motion_threshold=motion_threshold,
+            )
+            tmp_video = tempfile.NamedTemporaryFile(suffix=".mp4", delete=False)
+            tmp_video.close()
+            imageio.mimwrite(tmp_video.name, track_video_frames, format="mp4", fps=track_video_fps)
+            video_paths.append(tmp_video.name)
+
+    if render_videos and decode_grid:
         H = W = int(math.sqrt(n_decoder_tracks))
 
         batch_size = 1
@@ -509,17 +504,13 @@ def predict(
         video_paths = [tmpfile.name]
 
     # Ensure stable number of file outputs in the UI.
-    pdf_paths = (pdf_paths + [None] * 4)[:4]
     video_paths = (video_paths + [None] * 4)[:4]
-    return [np.concatenate(out_frames, axis=1), *pdf_paths, *video_paths]
+    return [np.concatenate(out_frames, axis=1), *video_paths]
 
 
 def load_video(
     selected_filename: str | None,
     inputs: SampleState,
-    model_state: ModelState,
-    center_crop: bool,
-    start_idx: int,
     video_dir: str,
 ):
     """Load first frame of a selected video and return (frame, SampleState)."""
@@ -528,7 +519,7 @@ def load_video(
     full_path = os.path.join(video_dir, selected_filename)
     try:
         reader = imageio.get_reader(full_path)
-        frame = reader.get_data(start_idx)
+        frame = reader.get_data(0)
     except Exception as e:
         print(f"Failed to read video {full_path}: {e}", flush=True)
         return None, inputs
@@ -539,20 +530,13 @@ def load_video(
     elif frame.shape[2] == 4:
         frame = frame[:, :, :3]
 
-    # center-crop & resize to target size (reuse same logic as preprocess_image)
     H, W, C = frame.shape
     target_size = 256
     min_size = min(H, W)
 
-    if center_crop:
-        start_h = (H - min_size) // 2
-        start_w = (W - min_size) // 2
-        frame = frame[start_h : start_h + min_size, start_w : start_w + min_size, :]
-        frame = np.array(Image.fromarray(frame).resize((target_size, target_size), Image.BICUBIC))
-    else:  # keep aspect ratio, resize smaller side to target_size
-        scale = target_size / min_size
-        new_h, new_w = int(round(H * scale)), int(round(W * scale))
-        frame = np.array(Image.fromarray(frame).resize((new_w, new_h), Image.BICUBIC))
+    scale = target_size / min_size
+    new_h, new_w = int(round(H * scale)), int(round(W * scale))
+    frame = np.array(Image.fromarray(frame).resize((new_w, new_h), Image.BICUBIC))
 
     inputs = SampleState(image=frame)
     return frame, inputs
@@ -587,10 +571,18 @@ def demo(
                     label="Input Image", interactive=True, type="numpy", image_mode="RGB", format="png"
                 )
 
-                center_crop = gr.Checkbox(label="center crop", value=False)
-
-                # slider to pick start frame for video loaders
-                start_idx = gr.Slider(label="Start frame index", minimum=0, maximum=100, step=1, value=0)
+                new_track_button = gr.Button("Start New Track")
+                new_track_button.click(
+                    lambda inputs: inputs.all_tracks.append([]) or inputs,
+                    inputs=[inputs],
+                    outputs=[inputs],
+                )
+                reset_tracks_button = gr.Button("Reset Tracks")
+                reset_tracks_button.click(
+                    lambda inputs: setattr(inputs, "all_tracks", [[]]) or inputs,
+                    inputs=[inputs],
+                    outputs=[inputs],
+                )
 
                 # Directory with Pexel videos to choose from
                 pexel_video_paths = sorted(
@@ -614,29 +606,14 @@ def demo(
                 # register module-level load_video, binding demo's video_dir via partial
                 load_pexel_video_button.click(
                     partial(load_video, video_dir=video_pexel_dir),
-                    inputs=[video_pexel_dropdown, inputs, gr_model, center_crop, start_idx],
+                    inputs=[video_pexel_dropdown, inputs],
                     outputs=[image_input, inputs],
-                )
-
-                new_track_button = gr.Button("Start New Track")
-                new_track_button.click(
-                    lambda inputs: inputs.all_tracks.append([]) or inputs,
-                    inputs=[inputs],
-                    outputs=[inputs],
-                )
-                reset_tracks_button = gr.Button("Reset Tracks")
-                reset_tracks_button.click(
-                    lambda inputs: setattr(inputs, "all_tracks", [[]]) or inputs,
-                    inputs=[inputs],
-                    outputs=[inputs],
                 )
 
                 @torch.no_grad()
                 def preprocess_image(
                     image_input: UInt8[np.ndarray, "h w c"] | None,
                     inputs: SampleState,
-                    model: ModelState,
-                    center_crop: bool = False,
                 ):
                     if image_input is None:
                         return None, None
@@ -645,24 +622,16 @@ def demo(
                     target_size: int = 256
                     min_size = min(H, W)
 
-                    if center_crop:
-                        start_h = (H - min_size) // 2
-                        start_w = (W - min_size) // 2
-                        frame = image_input[start_h : start_h + min_size, start_w : start_w + min_size, :]
-                        frame = np.array(Image.fromarray(frame).resize((target_size, target_size), Image.BICUBIC))
-                    else:  # keep aspect ratio, resize smaller side to target_size
-                        scale = target_size / min_size
-                        new_h, new_w = int(round(H * scale)), int(round(W * scale))
-                        frame = np.array(Image.fromarray(image_input).resize((new_w, new_h), Image.BICUBIC))
+                    scale = target_size / min_size
+                    new_h, new_w = int(round(H * scale)), int(round(W * scale))
+                    frame = np.array(Image.fromarray(image_input).resize((new_w, new_h), Image.BICUBIC))
 
                     inputs = SampleState(
                         image=frame,
                     )
                     return frame, inputs
 
-                image_input.upload(
-                    preprocess_image, inputs=[image_input, inputs, gr_model, center_crop], outputs=[image_input, inputs]
-                )
+                image_input.upload(preprocess_image, inputs=[image_input, inputs], outputs=[image_input, inputs])
 
                 def input_click(image_input, inputs: SampleState, evt: gr.SelectData):
                     if image_input is None:
@@ -676,14 +645,6 @@ def demo(
             # Output visualization
             with gr.Column():
                 image_output = gr.Image(label="Prediction", type="numpy", image_mode="RGB", format="png")
-                with gr.Row():
-                    # image_outputs_sep = [
-                    #     gr.Image(label=f"Prediction {i+1}", type="numpy", image_mode="RGB", format="png", scale=1)
-                    #     for i in range(4)
-                    # ]
-                    image_outputs_sep = [
-                        gr.File(label=f"Prediction {i + 1} (PDF)", file_types=[".pdf"]) for i in range(4)
-                    ]
 
                 with gr.Row():
                     video_outputs_sep = [gr.Video(label=f"Prediction {i + 1}", format="mp4") for i in range(4)]
@@ -694,11 +655,12 @@ def demo(
                     cfg_scale = gr.Slider(label="CFG Scale", minimum=1, maximum=7, step=0.1, value=1)
                     n_decoder_tracks = gr.Number(label="Number of Decoder Tracks", value=80, precision=0, minimum=1)
                     n_vis_tracks = gr.Number(label="Number of Visualization Tracks", value=80, precision=0, minimum=1)
+                    render_videos = gr.Checkbox(label="Render Video Visualization", value=False)
                     decode_grid = gr.Checkbox(label="Use Decoding Grid", value=False)
                     decode_dense = gr.Checkbox(label="Use Dense Decoding", value=False)
                     seed = gr.Slider(label="Random Seed", minimum=0, maximum=2**32 - 1, step=1, value=42)
                     motion_threshold = gr.Slider(
-                        label="Motion Threshold", minimum=0.0, maximum=1.0, step=0.01, value=1.0
+                        label="Motion Threshold", minimum=0.0, maximum=5.0, step=0.1, value=1.0
                     )
 
                 predict_button.click(
@@ -712,11 +674,11 @@ def demo(
                         decode_grid,
                         decode_dense,
                         seed,
+                        render_videos,
                         motion_threshold,
                     ],
                     outputs=[
                         image_output,
-                        *image_outputs_sep,
                         *video_outputs_sep,
                     ],
                     show_progress=True,
