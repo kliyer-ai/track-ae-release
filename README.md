@@ -98,7 +98,7 @@ pip install -r requirements.txt
 
 The default inference and evaluation paths assume a CUDA GPU and use `bfloat16`.
 
-## 📊 Standard Evaluation
+## 📊 Track Prediction Evaluation
 
 The standard open-domain evaluation has two stages:
 
@@ -148,7 +148,7 @@ python -m scripts.eval \
 
 The evaluation prints per-model averages for `Min_MSE`, `Mean_MSE`, `MeanT_MSE`, endpoint error (`EPE`), and diversity statistics.
 
-## 🤖 LIBERO Action Prediction
+## 🤖 LIBERO Action Prediction Evaluation
 
 For LIBERO, ZipMo predicts task-conditioned object motion from a task description and start frame. A lightweight policy head maps the generated motions to 7D robot actions for rollout evaluation.
 
