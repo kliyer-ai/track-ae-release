@@ -5,12 +5,12 @@ import fire
 import torch
 import torchvision
 from jaxtyping import Float
-from model.gen import TrackFM_Dense, TrackFM_Sparse
-from model.vae import TrackVAE
 from PIL import Image
 from tqdm.auto import tqdm
 
 from scripts.demo import draw_trajectories_on_frame
+from zipmo.planner import ZipMoPlanner_Dense, ZipMoPlanner_Sparse
+from zipmo.vae import ZipMoVAE
 
 
 def get_track_cond_eval(tracks: Float[torch.Tensor, "B N T 2"]) -> Float[torch.Tensor, "B N_cond 5"]:
@@ -39,7 +39,7 @@ def main(
     samples_path=Path("/export/scratch/ra49veb/cvpr-2026/track-ae/wan_samples_2"),
     output_path=Path("./outputs/evals"),
     gt_path="./data/gt_tracks.pt",
-    mode: Literal["few_poke", "dense"] = "few_poke",
+    mode: Literal["sparse", "dense"] = "sparse",
     cfg_scale: float = 1.0,
     K: int = 8,
     seed: int = 43,
@@ -54,14 +54,14 @@ def main(
         map_location="cpu",
     )
 
-    vae = TrackVAE()
-    if mode == "few_poke":
-        output_path = output_path / f"few_poke-cfg{cfg_scale}-seed{seed}"
-        model = TrackFM_Sparse(vae=vae)
+    vae = ZipMoVAE()
+    if mode == "sparse":
+        output_path = output_path / f"sparse-cfg{cfg_scale}-seed{seed}"
+        model = ZipMoPlanner_Sparse(vae=vae)
         model_path = "./checkpoints/track_gen_sparse.pt"
     elif mode == "dense":
         output_path = output_path / f"dense-cfg{cfg_scale}-seed{seed}"
-        model = TrackFM_Dense(vae=vae)
+        model = ZipMoPlanner_Dense(vae=vae)
         model_path = "./checkpoints/track_gen_dense.pt"
 
     model.eval()
