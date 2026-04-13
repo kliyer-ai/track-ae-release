@@ -5,10 +5,10 @@ import torch
 from einops import rearrange, repeat
 from jaxtyping import Float, Int
 from torch import nn
-from zipmo.gen import TrackFMLibero
 
 from utils.libero_utils.viz import sample_grid
 from zipmo.blocks import Level, SimpleProj, SimpleProjIn, TransformerLayer
+from zipmo.planner import ZipMoPlanner_Libero
 from zipmo.rope import make_axial_pos_2d
 from zipmo.vae import ZipMoVAE
 
@@ -40,7 +40,7 @@ class PolicyHead(nn.Module):
         super().__init__()
 
         track_ae = ZipMoVAE()
-        self.track_predictor = TrackFMLibero(vae=track_ae, use_t_input=track_predictor_use_t_input)
+        self.track_predictor = ZipMoPlanner_Libero(vae=track_ae, use_t_input=track_predictor_use_t_input)
 
         self.vis_tracks = vis_tracks
 
