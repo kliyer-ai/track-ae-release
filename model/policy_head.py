@@ -39,7 +39,7 @@ class PolicyHead(nn.Module):
     ) -> None:
         super().__init__()
 
-        track_ae = TrackVAE()  # TODO init properly
+        track_ae = TrackVAE()
         self.track_predictor = TrackFMLibero(vae=track_ae, use_t_input=track_predictor_use_t_input)
 
         self.vis_tracks = vis_tracks

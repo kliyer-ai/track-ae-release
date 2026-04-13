@@ -390,6 +390,7 @@ def predict(
     decode_grid: bool = False,
     decode_dense: bool = False,
     seed: int = 42,
+    motion_threshold: float = 1.0,
 ) -> tuple[UInt8[np.ndarray, "h w c"], None]:
     assert inputs.image is not None, "Image input is required for prediction."
 
@@ -455,6 +456,8 @@ def predict(
     out_videos = []
     # Save individual frames as PDF files for Gradio File outputs.
     pdf_paths = []
+    # Save individual videos as MP4 files for Gradio File outputs.
+    video_paths = []
 
     for pred_track in pred_tracks:
         out_frame = draw_trajectories_on_frame(
@@ -471,8 +474,13 @@ def predict(
         track_video_frames, track_video_fps = render_track_video(
             inputs.image,
             pred_track[:n_vis_tracks].cpu(),
+            motion_threshold=motion_threshold,
         )
         out_videos.append(track_video_frames)
+        tmp_video = tempfile.NamedTemporaryFile(suffix=".mp4", delete=False)
+        tmp_video.close()
+        imageio.mimwrite(tmp_video.name, track_video_frames, format="mp4", fps=track_video_fps)
+        video_paths.append(tmp_video.name)
 
     out_video = None
     if out_videos:
@@ -512,7 +520,11 @@ def predict(
         imageio.mimwrite(tmpfile.name, flow_video.movedim(1, -1).cpu().numpy(), format="mp4", fps=15)
 
         out_video = tmpfile.name
-    return [np.concatenate(out_frames, axis=1), *pdf_paths, out_video]
+
+    # Ensure stable number of file outputs in the UI.
+    pdf_paths = (pdf_paths + [None] * 4)[:4]
+    video_paths = (video_paths + [None] * 4)[:4]
+    return [np.concatenate(out_frames, axis=1), *pdf_paths, out_video, *video_paths]
 
 
 def load_video(
@@ -573,7 +585,7 @@ def demo(
 
         vae = TrackVAE()
         model = TrackFM_FewPoke(vae=vae)
-        sd = torch.load("./checkpoints/track_gen_sparse.pt")
+        sd = torch.load("./checkpoints/zipmo_planner_sparse.pt", weights_only=False)
         model.load_state_dict(sd)
         model.eval()
         model.to(device)
@@ -714,6 +726,10 @@ def demo(
                     ]
 
                 video_output = gr.Video(label="Prediction Video", format="mp4")
+                with gr.Row():
+                    video_outputs_sep = [
+                        gr.File(label=f"Prediction {i + 1} (MP4)", file_types=[".mp4"]) for i in range(4)
+                    ]
 
                 predict_button = gr.Button("Predict", variant="primary")
 
@@ -724,6 +740,9 @@ def demo(
                     decode_grid = gr.Checkbox(label="Use Decoding Grid", value=False)
                     decode_dense = gr.Checkbox(label="Use Dense Decoding", value=False)
                     seed = gr.Slider(label="Random Seed", minimum=0, maximum=2**32 - 1, step=1, value=42)
+                    motion_threshold = gr.Slider(
+                        label="Motion Threshold", minimum=0.0, maximum=1.0, step=0.01, value=1.0
+                    )
 
                 predict_button.click(
                     predict,
@@ -736,11 +755,13 @@ def demo(
                         decode_grid,
                         decode_dense,
                         seed,
+                        motion_threshold,
                     ],
                     outputs=[
                         image_output,
                         *image_outputs_sep,
                         video_output,
+                        *video_outputs_sep,
                     ],  # outputs=[image_output, image_outputs_sep, video_output],
                     show_progress=True,
                 )
