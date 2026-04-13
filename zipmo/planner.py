@@ -222,9 +222,9 @@ class ZipMoPlanner(nn.Module):
                 dim=1,
             )
 
-        assert track_cond_emb.shape[1] == self.n_cond, (
-            f"Expected track_cond_emb with {self.n_cond} tokens, got {track_cond_emb.shape[1]}"
-        )
+        assert (
+            track_cond_emb.shape[1] == self.n_cond
+        ), f"Expected track_cond_emb with {self.n_cond} tokens, got {track_cond_emb.shape[1]}"
 
         return {
             "extra_tokens": start_embed,
@@ -720,3 +720,7 @@ class ZipMoPlanner_Libero(ZipMoPlanner):
             start_frame=start_frame,
         )
         return einops.rearrange(tracks, "(b v) n t c -> b v n t c", v=self.num_views)
+
+
+ZipMoPlanner_Libero_ATM: ZipMoPlanner_Libero = partial(ZipMoPlanner_Libero, use_t_input=False)  # type: ignore
+ZipMoPlanner_Libero_TraMoE: ZipMoPlanner_Libero = partial(ZipMoPlanner_Libero, use_t_input=True)  # type: ignore
