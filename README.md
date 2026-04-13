@@ -106,7 +106,7 @@ The default inference and evaluation paths assume a CUDA GPU and use `bfloat16`.
 Single-GPU training can be launched with:
 
 ```bash
-python train.py \
+python -m scripts.train \
   --train_data_tar_base /path/to/preprocessed/train/shards \
   --val_data_tar_base /path/to/preprocessed/val/shards \
   --out_dir outputs/train_zipmo
@@ -115,13 +115,13 @@ python train.py \
 For multi-GPU training, use `torchrun`:
 
 ```bash
-torchrun --nnodes 1 --nproc-per-node 2 train.py \
+torchrun --nnodes 1 --nproc-per-node 2 -m scripts.train \
   --train_data_tar_base /path/to/preprocessed/train/shards \
   --val_data_tar_base /path/to/preprocessed/val/shards \
   --out_dir outputs/train_zipmo
 ```
 
-Training can be resumed from a checkpoint by adding, for example, `--load_checkpoint outputs/train_zipmo/checkpoints/checkpoint_0100000.pt`. All arguments in [`train.py`](train.py) are exposed through the CLI via `fire`.
+Training can be resumed from a checkpoint by adding, for example, `--load_checkpoint outputs/train_zipmo/checkpoints/checkpoint_0100000.pt`. All arguments in [`scripts/train.py`](scripts/train.py) are exposed through the CLI via `fire`.
 
 ## 📊 Track Prediction Evaluation
 
@@ -236,6 +236,7 @@ zipmo/
   dino.py         # image encoder utilities
 
 scripts/
+  train.py                # motion autoencoder training
   demo.py                 # Gradio demo
   sample.py               # open-domain trajectory sampling
   eval.py                 # open-domain metric computation
