@@ -115,7 +115,7 @@ def compute_metrics_atm(
             "MeanT_MSE": mean_T_mse_list,
             "Mean_MSE": mean_mse_list,
             "Min_MSE": min_mse_list,
-            "Min_Idx": min_l1_idx_list,
+            "Min_Idx": min_mse_idx_list,
             **l1_dict,
         }
 
