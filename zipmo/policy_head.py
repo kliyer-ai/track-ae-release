@@ -146,6 +146,7 @@ class PolicyHead(nn.Module):
     def forward(
         self,
         start_frame: Float[torch.Tensor, "B V H W C"],
+        task_emb: Float[torch.Tensor, "B C"],
         actions: Float[torch.Tensor, "B T C"],
         joint_states: Float[torch.Tensor, "B T J"],
         gripper_states: Float[torch.Tensor, "B T G"],
@@ -157,10 +158,12 @@ class PolicyHead(nn.Module):
             sample_tensor = torch.randn((B, *self.track_predictor.val_shape), device=actions.device)
             track_conds = torch.randn((B, 1, 5), device=actions.device)  # dummy track conditions
             view_id = torch.zeros((B,), dtype=torch.long, device=actions.device)  # dummy view id
+            task_emb = torch.Tensor(task_emb).to(device=actions.device, dtype=actions.dtype)
 
             track_pred = self.track_predictor.sample(
                 sample_tensor,
                 start_frame=start_frame,
+                txt_emb=rearrange(task_emb, "b c -> b 1 c"),
                 decode_latent=False,
                 track_conds=track_conds,
                 view_id=view_id,
