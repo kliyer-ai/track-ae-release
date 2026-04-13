@@ -1,7 +1,5 @@
 # Learning Long-term Motion Embeddings for Efficient Kinematics Generation
 
-<!-- <h2 align="center">🚀 ZipMo: Efficient long-horizon kinematics generation in motion space</h2> -->
-
 [![Project Page](https://img.shields.io/badge/Project-Page-blue)](https://compvis.github.io/long-term-motion)
 [![arXiv](https://img.shields.io/badge/arXiv-coming_soon-b31b1b)](https://arxiv.org/)
 [![Weights](https://img.shields.io/badge/HuggingFace-Weights-orange)](https://huggingface.co/CompVis/ZipMo)
@@ -24,13 +22,13 @@
   <img src="docs/static/images/motion-embedding/teaser_white.png" alt="ZipMo teaser figure">
 </p>
 
-Understanding and predicting motion is a fundamental component of visual intelligence. ZipMo models scene dynamics by operating directly on a long-term motion embedding learned from large-scale tracker trajectories. This motion-first representation avoids full video synthesis when the target is kinematics: it supports efficient generation of long, realistic motions that satisfy goals specified by text prompts or spatial pokes.
+Understanding and predicting motion is a fundamental component of visual intelligence. ZipMo models scene dynamics by operating directly on a long-term motion embedding learned from large-scale tracker trajectories. This motion-first representation avoids full video synthesis when the target is kinematics: it supports efficient generation of long, realistic motions from spatial pokes in open-domain videos and from task/text embeddings in LIBERO.
 
 ## ✨ Highlights
 
 - We learn a compact long-term motion embedding from tracker-derived trajectories and start-frame context.
 - The embedding reaches 64x temporal compression and still supports dense reconstruction at arbitrary spatial query points.
-- Conditional flow matching in this learned motion space generates diverse, goal-conditioned trajectories from text or spatial pokes.
+- Conditional flow matching in this learned motion space generates diverse, goal-conditioned trajectories from spatial pokes and task/text embeddings.
 - On open-domain videos and LIBERO robotics benchmarks, the model improves motion quality and action prediction while being substantially more efficient than video-space generation.
 
 ## 🚀 Usage
@@ -54,6 +52,8 @@ The demo loads the sparse planner, lets you upload or choose a start frame, clic
 ```bash
 python -m scripts.demo --server_port 55555 --compile True
 ```
+
+With compilation enabled, the first sampling step can be slow because PyTorch is compiling the model. Later samples should be faster.
 
 ### 🔥 Torch Hub
 
@@ -97,6 +97,30 @@ pip install -r requirements.txt
 ```
 
 The default inference and evaluation paths assume a CUDA GPU and use `bfloat16`.
+
+## 🔧 Training
+
+**Data Preprocessing.** For data collection and preprocessing, follow the [Flow Poke Transformer data preprocessing guide](https://github.com/CompVis/flow-poke-transformer/blob/main/scripts/data/README.md). ZipMo uses the same general setup: collect videos, shard them with `webdataset`, and pre-extract tracker trajectories before training.
+
+Single-GPU training can be launched with:
+
+```bash
+python train.py \
+  --train_data_tar_base /path/to/preprocessed/train/shards \
+  --val_data_tar_base /path/to/preprocessed/val/shards \
+  --out_dir outputs/train_zipmo
+```
+
+For multi-GPU training, use `torchrun`:
+
+```bash
+torchrun --nnodes 1 --nproc-per-node 2 train.py \
+  --train_data_tar_base /path/to/preprocessed/train/shards \
+  --val_data_tar_base /path/to/preprocessed/val/shards \
+  --out_dir outputs/train_zipmo
+```
+
+Training can be resumed from a checkpoint by adding, for example, `--load_checkpoint outputs/train_zipmo/checkpoints/checkpoint_0100000.pt`. All arguments in [`train.py`](train.py) are exposed through the CLI via `fire`.
 
 ## 📊 Track Prediction Evaluation
 
