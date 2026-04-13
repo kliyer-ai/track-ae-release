@@ -13,8 +13,8 @@ import torch.distributed.nn as dist_nn
 from torch.nn.parallel import DistributedDataParallel as DDP
 from tqdm.auto import tqdm
 
-from model.data import TrackerDataModule
-from model.vae import TrackVAE
+from zipmo.data import TrackerDataModule
+from zipmo.vae import ZipMoVAE
 
 
 def endless_iter(iterable):
@@ -115,7 +115,7 @@ def train(
 
     # Important setup stuff
     # If you want to change anything about what you train, you'll likely want to do it here and add it as a parameter to train()
-    model: TrackVAE = TrackVAE(unlock_img_embedder=unlock_img_embedder).to(device)
+    model: ZipMoVAE = ZipMoVAE(unlock_img_embedder=unlock_img_embedder).to(device)
     data = TrackerDataModule(
         train=dict(shards=[train_data_tar_base], batch_size=local_batch_size, num_workers=16),
         validation=dict(shards=[val_data_tar_base], batch_size=local_batch_size, num_workers=4),
