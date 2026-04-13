@@ -19,12 +19,12 @@ import numpy as np
 import torch
 from jaxtyping import UInt8
 from matplotlib.patches import Circle, FancyArrowPatch, Rectangle
-from zipmo.rope import make_axial_pos_2d
 from PIL import Image, ImageDraw
 from torchvision.transforms.functional import resize
 from torchvision.utils import flow_to_image
 
 from zipmo.planner import ZipMoPlanner
+from zipmo.rope import make_axial_pos_2d
 
 VAL_SHAPE = [256, 16]
 

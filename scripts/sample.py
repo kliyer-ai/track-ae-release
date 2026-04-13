@@ -9,8 +9,7 @@ from PIL import Image
 from tqdm.auto import tqdm
 
 from scripts.demo import draw_trajectories_on_frame
-from zipmo.planner import ZipMoPlanner_Dense, ZipMoPlanner_Sparse
-from zipmo.vae import ZipMoVAE
+from zipmo.planner import ZipMoPlanner
 
 
 def get_track_cond_eval(tracks: Float[torch.Tensor, "B N T 2"]) -> Float[torch.Tensor, "B N_cond 5"]:
@@ -36,12 +35,11 @@ def concatenate_images_horizontally(images: list[Image.Image]) -> Image.Image:
 
 
 def main(
-    samples_path=Path("/export/scratch/ra49veb/cvpr-2026/track-ae/wan_samples_2"),
-    output_path=Path("./outputs/evals"),
     gt_path="./data/gt_tracks.pt",
+    samples_path=Path("./data/pexels"),
+    output_path=Path("./outputs/evals"),
     mode: Literal["sparse", "dense"] = "sparse",
     cfg_scale: float = 1.0,
-    K: int = 8,
     seed: int = 43,
     noviz: bool = False,
 ):
@@ -54,19 +52,17 @@ def main(
         map_location="cpu",
     )
 
-    vae = ZipMoVAE()
     if mode == "sparse":
         output_path = output_path / f"sparse-cfg{cfg_scale}-seed{seed}"
-        model = ZipMoPlanner_Sparse(vae=vae)
-        model_path = "./checkpoints/track_gen_sparse.pt"
+        model: ZipMoPlanner = torch.hub.load("kliyer-ai/track-ae-release", "zipmo_planner_sparse")  # type: ignore
+        K = 8
     elif mode == "dense":
         output_path = output_path / f"dense-cfg{cfg_scale}-seed{seed}"
-        model = ZipMoPlanner_Dense(vae=vae)
-        model_path = "./checkpoints/track_gen_dense.pt"
+        model: ZipMoPlanner = torch.hub.load("kliyer-ai/track-ae-release", "zipmo_planner_dense")  # type: ignore
+        K = 128
+        noviz = True  # too many samples to visualize
 
     model.eval()
-    model.load_state_dict(torch.load(model_path, map_location="cpu"), strict=True)
-
     model = model.to(device="cuda", dtype=torch.bfloat16)
     model.cfg_scale = cfg_scale
 
@@ -108,7 +104,7 @@ def main(
             poke_list = [1, 2, 4, 8, 16]
 
         for n_pokes in poke_list:
-            ours_name = f"ours-{n_pokes}_pokes"
+            ours_name = f"zipmo-{n_pokes}_pokes"
             results[video_name][ours_name] = {
                 "tracks": [],
             }
