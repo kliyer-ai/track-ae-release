@@ -18,7 +18,7 @@ pip install -e .
 python benchmark_scripts/download_libero_datasets.py --download-dir .
 cd ..
 
-pip install -r requirements.txt
+pip install -r requirements_libero.txt
 python scripts/preproc_text_emb.py --dataset-root LIBERO/datasets
 ```
 
