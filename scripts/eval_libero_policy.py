@@ -20,7 +20,7 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-from model.policy_head import PolicyHead
+
 from utils.libero_utils import build_libero_env, merge_results, seed_everything
 from utils.libero_utils.viz import (
     combine_track_and_img,
@@ -28,6 +28,7 @@ from utils.libero_utils.viz import (
     render_done_to_boundary,
     video_pad_time,
 )
+from zipmo.policy_head import PolicyHead
 
 
 def parse_args():
@@ -94,8 +95,7 @@ def rollout_env(
         # across episodes when one episode terminates earlier than another.
         rollout_seed = int(base_seed + env_idx * 100_000 + rollout_i)
         print(
-            f"[progress] env={env_idx} rollout={rollout_i + 1}/{num_env_rollouts} "
-            f"reset rollout_seed={rollout_seed}",
+            f"[progress] env={env_idx} rollout={rollout_i + 1}/{num_env_rollouts} reset rollout_seed={rollout_seed}",
             flush=True,
         )
         obs = env.reset()
