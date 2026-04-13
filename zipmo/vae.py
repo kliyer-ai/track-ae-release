@@ -350,13 +350,13 @@ class TrajEncoder(nn.Module):
         return EncoderOutput(mean, logvar, query_pos)
 
 
-class TrackVAE(nn.Module):
+class ZipMoVAE(nn.Module):
     def __init__(
         self,
         kl_weight: float = 1e-7,
         unlock_img_embedder: bool = False,
     ):
-        super(TrackVAE, self).__init__()
+        super(ZipMoVAE, self).__init__()
 
         self.encoder = TrajEncoder()
         self.decoder = TrajRegressorDecoderMAE()

@@ -10,7 +10,7 @@ from zipmo.gen import TrackFMLibero
 from utils.libero_utils.viz import sample_grid
 from zipmo.blocks import Level, SimpleProj, SimpleProjIn, TransformerLayer
 from zipmo.rope import make_axial_pos_2d
-from zipmo.vae import TrackVAE
+from zipmo.vae import ZipMoVAE
 
 
 class PolicyHead(nn.Module):
@@ -39,7 +39,7 @@ class PolicyHead(nn.Module):
     ) -> None:
         super().__init__()
 
-        track_ae = TrackVAE()  # TODO init properly
+        track_ae = ZipMoVAE()  # TODO init properly
         self.track_predictor = TrackFMLibero(vae=track_ae, use_t_input=track_predictor_use_t_input)
 
         self.vis_tracks = vis_tracks

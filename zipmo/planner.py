@@ -10,7 +10,7 @@ from tqdm import trange
 from zipmo.blocks import FeedForwardBlock, InputMLP, Level, RMSNorm, TransformerLayer
 from zipmo.dino import MinDino
 from zipmo.rope import centers, make_axial_pos_2d
-from zipmo.vae import TrackVAE
+from zipmo.vae import ZipMoVAE
 
 
 class CondTokenConcatMerge(nn.Module):
@@ -74,7 +74,7 @@ class ZipMoPlanner(nn.Module):
         self,
         n_cond: int,
         poisson_rate: float | None,
-        vae: TrackVAE,
+        vae: ZipMoVAE,
         depth: int = 24,
         width: int = 1024,
         d_cross: int = 768,
@@ -387,7 +387,7 @@ ZipMoPlanner_Dense: ZipMoPlanner = partial(ZipMoPlanner, n_cond=40, poisson_rate
 class ZipMoPlanner_Libero(ZipMoPlanner):
     def __init__(
         self,
-        vae: TrackVAE,
+        vae: ZipMoVAE,
         n_cond: int = 1,
         poisson_rate: float | None = None,
         num_views: int = 2,
