@@ -564,8 +564,7 @@ def demo(
     share: bool = False,
     server_name: str = "0.0.0.0",
     server_port: int = 55555,
-    video_pexel_dir="/export/scratch/ra49veb/cvpr-2026/track-ae/wan_samples_2",
-    video_davis_dir="/export/group/datasets/DAVIS/videos",
+    video_pexel_dir="./data/pexels",
 ):
     with gr.Blocks() as demo:
         gr.Markdown("## Motion Spaces Demo")
@@ -576,7 +575,7 @@ def demo(
         model.requires_grad_(False)
 
         if compile:
-            model._predict_velocity = torch.compile(model._predict_velocity, fullgraph=True)
+            model._predict_velocity = torch.compile(model._predict_velocity)
 
         gr_model = gr.State(ModelState(model=model, device=torch.device(device)))
 
@@ -616,29 +615,6 @@ def demo(
                 load_pexel_video_button.click(
                     partial(load_video, video_dir=video_pexel_dir),
                     inputs=[video_pexel_dropdown, inputs, gr_model, center_crop, start_idx],
-                    outputs=[image_input, inputs],
-                )
-
-                # Directory with DAVIS videos to choose from
-                davis_video_paths = sorted(
-                    sum(
-                        (glob.glob(os.path.join(video_davis_dir, f"*.{ext}")) for ext in ["mp4", "avi", "mov", "mkv"]),
-                        [],
-                    )
-                )
-                davis_video_choices = [os.path.basename(p) for p in davis_video_paths]
-                with gr.Row():  # dropdown and load button side-by-side
-                    video_davis_dropdown = gr.Dropdown(
-                        choices=davis_video_choices,
-                        label="Select DAVIS Video",
-                        value=davis_video_choices[0] if davis_video_choices else None,
-                    )
-                    load_davis_video_button = gr.Button("Load video")
-
-                # register module-level load_video, binding demo's video_dir via partial
-                load_davis_video_button.click(
-                    partial(load_video, video_dir=video_davis_dir),
-                    inputs=[video_davis_dropdown, inputs, gr_model, center_crop, start_idx],
                     outputs=[image_input, inputs],
                 )
 
