@@ -1,16 +1,16 @@
 import math
-import torch
-
 from collections.abc import Mapping
-from model.blocks import Level, TransformerLayer, SimpleProj, SimpleProjIn
-from model.gen import TrackFMLibero
-from model.rope import make_axial_pos_2d
-from model.vae import TrackVAE
+
+import torch
 from einops import rearrange, repeat
 from jaxtyping import Float, Int
 from torch import nn
-from typing import Dict
+from zipmo.gen import TrackFMLibero
+
 from utils.libero_utils.viz import sample_grid
+from zipmo.blocks import Level, SimpleProj, SimpleProjIn, TransformerLayer
+from zipmo.rope import make_axial_pos_2d
+from zipmo.vae import TrackVAE
 
 
 class PolicyHead(nn.Module):
@@ -146,7 +146,6 @@ class PolicyHead(nn.Module):
         start_t: Int[torch.Tensor, "B"] | None = None,
         **kwargs,
     ):
-
         B, T, C = actions.shape
         with torch.no_grad():
             sample_tensor = torch.randn((B, *self.track_predictor.val_shape), device=actions.device)

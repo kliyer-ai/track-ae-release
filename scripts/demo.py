@@ -19,13 +19,12 @@ import numpy as np
 import torch
 from jaxtyping import UInt8
 from matplotlib.patches import Circle, FancyArrowPatch, Rectangle
+from model.gen import TrackFM, TrackFM_Sparse
+from model.rope import make_axial_pos_2d
+from model.vae import TrackVAE
 from PIL import Image, ImageDraw
 from torchvision.transforms.functional import resize
 from torchvision.utils import flow_to_image
-
-from model.gen import TrackFM, TrackFM_FewPoke
-from model.rope import make_axial_pos_2d
-from model.vae import TrackVAE
 
 VAL_SHAPE = [256, 16]
 
@@ -572,7 +571,7 @@ def demo(
         gr.Markdown("## Motion Spaces Demo")
 
         vae = TrackVAE()
-        model = TrackFM_FewPoke(vae=vae)
+        model = TrackFM_Sparse(vae=vae)
         sd = torch.load("./checkpoints/track_gen_sparse.pt")
         model.load_state_dict(sd)
         model.eval()

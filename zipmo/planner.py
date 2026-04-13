@@ -7,10 +7,10 @@ from jaxtyping import Float
 from torch import nn
 from tqdm import trange
 
-from model.blocks import FeedForwardBlock, InputMLP, Level, RMSNorm, TransformerLayer
-from model.dino import MinDino
-from model.rope import centers, make_axial_pos_2d
-from model.vae import TrackVAE
+from zipmo.blocks import FeedForwardBlock, InputMLP, Level, RMSNorm, TransformerLayer
+from zipmo.dino import MinDino
+from zipmo.rope import centers, make_axial_pos_2d
+from zipmo.vae import TrackVAE
 
 
 class CondTokenConcatMerge(nn.Module):
@@ -58,7 +58,7 @@ class FourierFeatures(nn.Module):
         return torch.cat((features.cos(), features.sin()), dim=-1)
 
 
-class TrackFM(nn.Module):
+class ZipMoPlanner(nn.Module):
     """
     Clean generator implementation for the released `traj_gen_v2` model.
 
@@ -380,11 +380,11 @@ class TrackFM(nn.Module):
         )
 
 
-TrackFM_FewPoke: TrackFM = partial(TrackFM, n_cond=16, poisson_rate=2.5)
-TrackFM_Dense: TrackFM = partial(TrackFM, n_cond=40, poisson_rate=None)
+ZipMoPlanner_Sparse: ZipMoPlanner = partial(ZipMoPlanner, n_cond=16, poisson_rate=2.5)  # type: ignore
+ZipMoPlanner_Dense: ZipMoPlanner = partial(ZipMoPlanner, n_cond=40, poisson_rate=None)  # type: ignore
 
 
-class TrackFMLibero(TrackFM):
+class ZipMoPlanner_Libero(ZipMoPlanner):
     def __init__(
         self,
         vae: TrackVAE,

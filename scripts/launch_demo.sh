@@ -1,6 +1,6 @@
 #! /bin/bash
-#SBATCH -p h200
-#SBATCH --gres gpu:h200:1
+#SBATCH -p a100
+#SBATCH --gres gpu:a100:1
 #SBATCH --time 6:00:00
 
 

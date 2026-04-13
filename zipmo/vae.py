@@ -9,9 +9,9 @@ from jaxtyping import Float
 from torch import nn
 from tqdm import tqdm
 
-from model.blocks import InputMLP, Level, OutputMLP, TransformerLayer
-from model.dino import MinDino
-from model.rope import centers, make_axial_pos_2d
+from zipmo.blocks import InputMLP, Level, OutputMLP, TransformerLayer
+from zipmo.dino import MinDino
+from zipmo.rope import centers, make_axial_pos_2d
 
 
 def chunk_grid_strided(grid, chunk_size=8):

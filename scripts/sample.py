@@ -5,11 +5,11 @@ import fire
 import torch
 import torchvision
 from jaxtyping import Float
+from model.gen import TrackFM_Dense, TrackFM_Sparse
+from model.vae import TrackVAE
 from PIL import Image
 from tqdm.auto import tqdm
 
-from model.gen import TrackFM_Dense, TrackFM_FewPoke
-from model.vae import TrackVAE
 from scripts.demo import draw_trajectories_on_frame
 
 
@@ -57,7 +57,7 @@ def main(
     vae = TrackVAE()
     if mode == "few_poke":
         output_path = output_path / f"few_poke-cfg{cfg_scale}-seed{seed}"
-        model = TrackFM_FewPoke(vae=vae)
+        model = TrackFM_Sparse(vae=vae)
         model_path = "./checkpoints/track_gen_sparse.pt"
     elif mode == "dense":
         output_path = output_path / f"dense-cfg{cfg_scale}-seed{seed}"
