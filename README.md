@@ -41,9 +41,10 @@ There are three common ways to get started:
 
 ### 🎮 Interactive Demo
 
-From a local checkout with dependencies installed, launch the Gradio demo. If you still need to set up the environment, use the Manual Setup steps at the end of this section.
+From a local checkout with dependencies installed, launch the Gradio demo. Need an environment first? Use the Manual Setup steps at the end of this section, then come back here.
 
 ```bash
+# after Manual Setup below
 python -m scripts.demo --server_port 55555
 ```
 
