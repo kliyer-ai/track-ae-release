@@ -3,12 +3,9 @@ torchvision
 
 accelerate
 av
-cloudpickle
 decord
-einops==0.8.2
 fire
 gradio
-gym
 imageio[ffmpeg]
 jaxtyping
 matplotlib
@@ -16,11 +13,10 @@ numpy
 omegaconf
 opencv-python-headless
 pillow
-robosuite
 safetensors
 tqdm
 transformers
 wandb
 webdataset
 
-# LIBERO itself is installed from source; see Libero_README.md.
+# LIBERO itself is installed from source; see Libero section in README.md.
