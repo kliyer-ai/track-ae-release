@@ -82,6 +82,7 @@ def zipmo_planner_libero(mode: Literal["atm", "tramoe"], pretrained: bool = True
     from zipmo.vae import ZipMoVAE
 
     vae = ZipMoVAE()
+    assert mode in ["atm", "tramoe"], "Mode must be either 'atm' or 'tramoe'"
     planner_cls = ZipMoPlanner_Libero_ATM if mode == "atm" else ZipMoPlanner_Libero_TraMoE
     model = planner_cls(vae=vae, **kwargs)
 
@@ -97,11 +98,12 @@ def zipmo_planner_libero(mode: Literal["atm", "tramoe"], pretrained: bool = True
 
 def zipmo_policy_head(
     mode: Literal["atm", "tramoe"],
-    suit: Literal["10", "goal", "object", "spatial"] | None = None,
+    suite: Literal["10", "goal", "object", "spatial"] | None = None,
     pretrained: bool = True,
     **kwargs,
 ):
-    assert mode == "atm" or suit is not None, "For TraMOE, a suit must be specified"
+    assert mode == "atm" or suite is not None, "For TraMOE, a suite must be specified"
+    assert mode in ["atm", "tramoe"], "Mode must be either 'atm' or 'tramoe'"
 
     from zipmo.policy_head import PolicyHeadATM, PolicyHeadTraMoE
 
@@ -111,7 +113,7 @@ def zipmo_policy_head(
 
     name = f"zipmo_policy_head_{mode}"
     if mode == "tramoe":
-        name += f"_{suit}"
+        name += f"_{suite}"
 
     if pretrained:
         path = _download_safetensors(_MODEL_FILES[name])
