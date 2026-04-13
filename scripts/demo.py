@@ -19,8 +19,7 @@ import numpy as np
 import torch
 from jaxtyping import UInt8
 from matplotlib.patches import Circle, FancyArrowPatch, Rectangle
-from model.gen import TrackFM
-from model.rope import make_axial_pos_2d
+from zipmo.rope import make_axial_pos_2d
 from PIL import Image, ImageDraw
 from torchvision.transforms.functional import resize
 from torchvision.utils import flow_to_image
@@ -202,7 +201,7 @@ def draw_trajectories_on_frame(
 
 @dataclass
 class ModelState:
-    model: TrackFM
+    model: ZipMoPlanner
     device: torch.device
 
 
@@ -453,10 +452,9 @@ def predict(
         pred_tracks = einops.rearrange(pred_tracks, "b h w t c -> b (h w) t c")
 
     out_frames = []
-    out_videos = []
     # Save individual frames as PDF files for Gradio File outputs.
     pdf_paths = []
-    # Save individual videos as MP4 files for Gradio File outputs.
+    # Save individual videos as MP4 files for Gradio Video outputs.
     video_paths = []
 
     for pred_track in pred_tracks:
@@ -476,21 +474,10 @@ def predict(
             pred_track[:n_vis_tracks].cpu(),
             motion_threshold=motion_threshold,
         )
-        out_videos.append(track_video_frames)
         tmp_video = tempfile.NamedTemporaryFile(suffix=".mp4", delete=False)
         tmp_video.close()
         imageio.mimwrite(tmp_video.name, track_video_frames, format="mp4", fps=track_video_fps)
         video_paths.append(tmp_video.name)
-
-    out_video = None
-    if out_videos:
-        tiled_video = [
-            np.concatenate([video_frames[frame_idx] for video_frames in out_videos], axis=1)
-            for frame_idx in range(len(out_videos[0]))
-        ]
-        tmpfile = tempfile.NamedTemporaryFile(suffix=".mp4", delete=False)
-        imageio.mimwrite(tmpfile.name, tiled_video, format="mp4", fps=track_video_fps)
-        out_video = tmpfile.name
 
     if decode_grid:
         H = W = int(math.sqrt(n_decoder_tracks))
@@ -519,12 +506,12 @@ def predict(
         tmpfile = tempfile.NamedTemporaryFile(suffix=".mp4", delete=False)
         imageio.mimwrite(tmpfile.name, flow_video.movedim(1, -1).cpu().numpy(), format="mp4", fps=15)
 
-        out_video = tmpfile.name
+        video_paths = [tmpfile.name]
 
     # Ensure stable number of file outputs in the UI.
     pdf_paths = (pdf_paths + [None] * 4)[:4]
     video_paths = (video_paths + [None] * 4)[:4]
-    return [np.concatenate(out_frames, axis=1), *pdf_paths, out_video, *video_paths]
+    return [np.concatenate(out_frames, axis=1), *pdf_paths, *video_paths]
 
 
 def load_video(
@@ -722,11 +709,8 @@ def demo(
                         gr.File(label=f"Prediction {i + 1} (PDF)", file_types=[".pdf"]) for i in range(4)
                     ]
 
-                video_output = gr.Video(label="Prediction Video", format="mp4")
                 with gr.Row():
-                    video_outputs_sep = [
-                        gr.File(label=f"Prediction {i + 1} (MP4)", file_types=[".mp4"]) for i in range(4)
-                    ]
+                    video_outputs_sep = [gr.Video(label=f"Prediction {i + 1}", format="mp4") for i in range(4)]
 
                 predict_button = gr.Button("Predict", variant="primary")
 
@@ -757,9 +741,8 @@ def demo(
                     outputs=[
                         image_output,
                         *image_outputs_sep,
-                        video_output,
                         *video_outputs_sep,
-                    ],  # outputs=[image_output, image_outputs_sep, video_output],
+                    ],
                     show_progress=True,
                 )
 
