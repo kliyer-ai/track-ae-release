@@ -1,10 +1,10 @@
-# 🌀 Learning Long-term Motion Embeddings for Efficient Kinematics Generation
+# Learning Long-term Motion Embeddings for Efficient Kinematics Generation
 
-<h2 align="center">🚀 ZipMo: Efficient long-horizon kinematics generation in motion space</h2>
+<!-- <h2 align="center">🚀 ZipMo: Efficient long-horizon kinematics generation in motion space</h2> -->
 
 [![Project Page](https://img.shields.io/badge/Project-Page-blue)](https://compvis.github.io/long-term-motion)
+[![arXiv](https://img.shields.io/badge/arXiv-coming_soon-b31b1b)](https://arxiv.org/)
 [![Weights](https://img.shields.io/badge/HuggingFace-Weights-orange)](https://huggingface.co/CompVis/ZipMo)
-[![Code](https://img.shields.io/badge/GitHub-Code-black)](https://github.com/kliyer-ai/track-ae-release)
 [![Venue](https://img.shields.io/badge/CVPR-2026-green)](#citation)
 
 <div align="center">
@@ -54,8 +54,6 @@ The demo loads the sparse planner, lets you upload or choose a start frame, clic
 ```bash
 python -m scripts.demo --server_port 55555 --compile True
 ```
-
-To create a public Gradio link, add `--share True`.
 
 ### 🔥 Torch Hub
 
@@ -129,13 +127,7 @@ For example, if the targets unpack into a `gt_data` folder, either place the tar
 Sparse mode loads `zipmo_planner_sparse`, draws `K=8` samples per video, and evaluates the poke-conditioning settings `1`, `2`, `4`, `8`, and `16`. It also writes trajectory visualizations.
 
 ```bash
-python -m scripts.sample \
-  --mode sparse \
-  --gt_path data/gt_tracks.pt \
-  --samples_path data/pexels \
-  --output_path outputs/evals \
-  --cfg_scale 1.0 \
-  --seed 43
+python -m scripts.sample --mode sparse
 
 python -m scripts.eval \
   --results_path outputs/evals/sparse-cfg1.0-seed43/results.pt \
@@ -147,17 +139,11 @@ python -m scripts.eval \
 Dense mode loads `zipmo_planner_dense`, conditions on all `40` target trajectories, and draws `K=128` samples. Visualization is disabled by default in this mode because the sample count is large.
 
 ```bash
-python -m scripts.sample \
-  --mode dense \
-  --gt_path data/gt_tracks.pt \
-  --samples_path data/pexels \
-  --output_path outputs/evals \
-  --cfg_scale 1.0 \
-  --seed 43
+python -m scripts.sample --mode dense
 
 python -m scripts.eval \
   --results_path outputs/evals/dense-cfg1.0-seed43/results.pt \
-  --k 128
+  --k 128 # or 8
 ```
 
 The evaluation prints per-model averages for `Min_MSE`, `Mean_MSE`, `MeanT_MSE`, endpoint error (`EPE`), and diversity statistics.
