@@ -86,6 +86,7 @@ class PolicyHead(nn.Module):
         )  # 1 T C
 
         self.action_queue = []
+        self._rollout_generator = None
 
         # 6 modalities (we only use track predictions and proprioception): start frame view 1, start frame view 2, track pred view 1, track pred view 2, task_emb, proprio
         self.learnable_modality_emb = nn.Parameter(torch.randn(6, model_dim) * 0.02, requires_grad=True)
@@ -134,8 +135,13 @@ class PolicyHead(nn.Module):
 
         return cross_tokens, repeat(pos_cross, "n c -> b n c", b=B)
 
-    def reset(self):
+    def reset(self, seed: int | None = None):
         self.action_queue = []
+        self._rollout_generator = None
+        if seed is not None:
+            device = next(self.parameters()).device
+            self._rollout_generator = torch.Generator(device=device)
+            self._rollout_generator.manual_seed(int(seed))
 
     def forward(
         self,
@@ -214,8 +220,16 @@ class PolicyHead(nn.Module):
 
         # GET TRACK PREDICTION
         with torch.autocast(device_type=start_frame.device.type, dtype=torch.bfloat16):
-            sample_tensor = torch.randn((B, *self.track_predictor.val_shape), device=device)
-            track_conds = torch.randn((B, 1, 5), device=device)  # dummy track conditions
+            sample_tensor = torch.randn(
+                (B, *self.track_predictor.val_shape),
+                device=device,
+                generator=self._rollout_generator,
+            )
+            track_conds = torch.randn(
+                (B, 1, 5),
+                device=device,
+                generator=self._rollout_generator,
+            )  # dummy track conditions
             view_id = torch.zeros((B,), dtype=torch.long, device=device)  # dummy view id
 
             track_pred = self.track_predictor.sample(

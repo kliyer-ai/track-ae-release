@@ -388,6 +388,8 @@ class ZipMoPlanner_Libero(ZipMoPlanner):
     def __init__(
         self,
         vae: TrackVAE,
+        n_cond: int = 1,
+        poisson_rate: float | None = None,
         num_views: int = 2,
         text_enc_dim: int = 768,
         use_t_input: bool = False,
@@ -396,7 +398,7 @@ class ZipMoPlanner_Libero(ZipMoPlanner):
         text_enc_depth: int = 6,
         **kwargs,
     ):
-        super().__init__(vae=vae, **kwargs)
+        super().__init__(n_cond=n_cond, poisson_rate=poisson_rate, vae=vae, **kwargs)
 
         self.num_views = num_views
         self.use_t_input = use_t_input

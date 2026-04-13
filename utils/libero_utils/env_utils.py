@@ -3,6 +3,7 @@ import logging
 import multiprocessing
 import os
 import random
+import re
 import sys
 from functools import lru_cache, partial
 from pathlib import Path
@@ -13,6 +14,41 @@ import torch
 # Required for vectorized envs
 if multiprocessing.get_start_method(allow_none=True) != "spawn":
     multiprocessing.set_start_method("spawn", force=True)
+
+
+def seed_everything(seed: int) -> None:
+    """Seed Python / NumPy / Torch RNGs for reproducible eval."""
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed(seed)
+        torch.cuda.manual_seed_all(seed)
+    if torch.backends.cudnn.is_available():
+        torch.backends.cudnn.benchmark = False
+        torch.backends.cudnn.deterministic = True
+
+
+def merge_results(results: list[dict]):
+    merged = {}
+    for result in results:
+        merged.update(result)
+
+    def _collect_env_metric(prefix: str) -> np.ndarray:
+        # Only include per-environment keys like rollout/<metric>_env0, _env1, ...
+        # Exclude aggregate keys such as rollout/<metric>_env_avg.
+        pattern = re.compile(rf"^{re.escape(prefix)}\d+$")
+        vals = [v for k, v in merged.items() if pattern.match(k)]
+        return np.array(vals, dtype=np.float32)
+
+    returns = _collect_env_metric("rollout/return_env")
+    horizons = _collect_env_metric("rollout/horizon_env")
+    successes = _collect_env_metric("rollout/success_env")
+
+    merged["rollout/return_env_avg"] = float(np.mean(returns))
+    merged["rollout/horizon_env_avg"] = float(np.mean(horizons))
+    merged["rollout/success_env_avg"] = float(np.mean(successes))
+    return merged
 
 
 def _repo_root() -> Path:
@@ -172,6 +208,7 @@ def build_libero_env(
     flip_image=True,
     libero_path=None,
     task_emb_cache_path=None,
+    seed: int | None = None,
     vecenv=True,
     **kwargs,
 ):
@@ -234,7 +271,12 @@ def build_libero_env(
     }
     env_args.update(kwargs)
 
-    def env_func(init_state_no):
+    def env_func(init_state_no=0, worker_seed: int | None = None):
+        if worker_seed is not None:
+            # Keep Python / NumPy / Torch RNG in each worker deterministic.
+            random.seed(worker_seed)
+            np.random.seed(worker_seed)
+            torch.manual_seed(worker_seed)
         env = OffScreenRenderEnv(**env_args)
         env = LiberoResetWrapper(env, init_states=init_states, init_state_no=init_state_no)
         env = EnvStateWrapper(env)
@@ -244,17 +286,29 @@ def build_libero_env(
             env = LiberoImageUpsideDownWrapper(env)
         env = LiberoSuccessWrapper(env)
         env = LiberoObservationWrapper(env, masks=None, cameras=env_args["camera_names"])
-        env.seed(init_state_no)
+        env.seed(worker_seed if worker_seed is not None else init_state_no)
         return env
 
     if vecenv:
-        init_state_no = random.sample(range(10), n_envs)
-        if n_envs == 1:
-            env = StackDummyVectorEnv([partial(env_func, init_state_no[0])])
+        rng = random.Random(seed) if seed is not None else random
+        init_state_count = len(init_states)
+        if n_envs <= init_state_count:
+            init_state_no = rng.sample(range(init_state_count), n_envs)
         else:
-            env = StackSubprocVectorEnv([partial(env_func, init_state_no[i]) for i in range(n_envs)])
+            init_state_no = [rng.randrange(init_state_count) for _ in range(n_envs)]
+
+        worker_seeds = (
+            [seed + i for i in range(n_envs)]
+            if seed is not None
+            else [init_state_no[i] for i in range(n_envs)]
+        )
+        if n_envs == 1:
+            env = StackDummyVectorEnv([partial(env_func, init_state_no[0], worker_seeds[0])])
+        else:
+            env = StackSubprocVectorEnv([partial(env_func, init_state_no[i], worker_seeds[i]) for i in range(n_envs)])
     else:
         assert n_envs == 1, "Non-vectorized environment can only have one environment"
-        env = env_func()
+        init_state_no = 0 if len(init_states) == 0 else (seed % len(init_states) if seed is not None else 0)
+        env = env_func(init_state_no=init_state_no, worker_seed=seed)
 
     return env, task.language, task_emb

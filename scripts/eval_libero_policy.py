@@ -21,7 +21,7 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 from model.policy_head import PolicyHead
-from utils.libero_utils import build_libero_env
+from utils.libero_utils import build_libero_env, merge_results, seed_everything
 from utils.libero_utils.viz import (
     combine_track_and_img,
     make_grid_video_from_numpy,
@@ -42,6 +42,7 @@ def parse_args():
     parser.add_argument("--vis_tracks", action="store_true")
     parser.add_argument("--img_size", type=int, default=128)
     parser.add_argument("--rollout_horizon", type=int, default=600)
+    parser.add_argument("--seed", type=int, default=42)
     parser.add_argument(
         "--libero_path",
         type=str,
@@ -60,21 +61,6 @@ def parse_args():
     return parser.parse_args()
 
 
-def merge_results(results: list[dict]):
-    merged = {}
-    for result in results:
-        merged.update(result)
-
-    returns = np.array([v for k, v in merged.items() if k.startswith("rollout/return_env")], dtype=np.float32)
-    horizons = np.array([v for k, v in merged.items() if k.startswith("rollout/horizon_env")], dtype=np.float32)
-    successes = np.array([v for k, v in merged.items() if k.startswith("rollout/success_env")], dtype=np.float32)
-
-    merged["rollout/return_env_avg"] = float(np.mean(returns))
-    merged["rollout/horizon_env_avg"] = float(np.mean(horizons))
-    merged["rollout/success_env_avg"] = float(np.mean(successes))
-    return merged
-
-
 @torch.no_grad()
 def rollout_env(
     env_idx,
@@ -83,6 +69,7 @@ def rollout_env(
     num_env_rollouts,
     task_emb,
     horizon,
+    base_seed,
     progress_every=25,
 ):
     policy.eval()
@@ -103,12 +90,16 @@ def rollout_env(
     videos = []
 
     for rollout_i in tqdm(range(num_env_rollouts), desc=f"env{env_idx} rollouts", leave=False):
+        # Re-seed policy sampling per rollout so trajectory RNG does not drift
+        # across episodes when one episode terminates earlier than another.
+        rollout_seed = int(base_seed + env_idx * 100_000 + rollout_i)
         print(
-            f"[progress] env={env_idx} rollout={rollout_i + 1}/{num_env_rollouts} reset",
+            f"[progress] env={env_idx} rollout={rollout_i + 1}/{num_env_rollouts} "
+            f"reset rollout_seed={rollout_seed}",
             flush=True,
         )
         obs = env.reset()
-        policy_ref.reset()
+        policy_ref.reset(seed=rollout_seed)
 
         n_envs = obs["image"].shape[0]
         success = np.zeros(n_envs, dtype=bool)
@@ -225,6 +216,7 @@ def evaluate(accelerator: Accelerator, args, video_save_dir: str):
                 "dataset_path": args.dataset_path,
                 "libero_path": args.libero_path,
                 "task_emb_cache_path": args.task_emb_cache_path,
+                "seed": args.seed + env_idx * 1000,
             }
         )
         env, _, task_emb = build_libero_env(**env_cfg)
@@ -236,6 +228,7 @@ def evaluate(accelerator: Accelerator, args, video_save_dir: str):
             num_env_rollouts=rollouts_per_env,
             task_emb=task_emb,
             horizon=args.rollout_horizon,
+            base_seed=args.seed,
         )
 
         video = result.pop(f"rollout/vis_env{env_idx}")
@@ -266,7 +259,7 @@ def main():
         "Eval config: "
         f"suite={args.suite}, track_pred_nfe={args.track_pred_nfe}, cfg_scale={args.cfg_scale}, "
         f"img_size={args.img_size}, mixed_precision=bf16, vis_tracks={args.vis_tracks}, "
-        f"num_env_rollouts={args.num_env_rollouts}, vec_env_num={args.vec_env_num}",
+        f"num_env_rollouts={args.num_env_rollouts}, vec_env_num={args.vec_env_num}, seed={args.seed}",
         flush=True,
     )
 
@@ -282,6 +275,26 @@ def main():
         cpu=False,
         kwargs_handlers=[process_group_kwargs],
     )
+
+    # make rollouts as deterministic as possible. there will still be some non-determinism
+    os.environ.setdefault("CUBLAS_WORKSPACE_CONFIG", ":4096:8")
+    if torch.cuda.is_available():
+        if hasattr(torch.backends.cuda, "enable_flash_sdp"):
+            torch.backends.cuda.enable_flash_sdp(True)
+        if hasattr(torch.backends.cuda, "enable_mem_efficient_sdp"):
+            torch.backends.cuda.enable_mem_efficient_sdp(False)
+        if hasattr(torch.backends.cuda, "enable_math_sdp"):
+            torch.backends.cuda.enable_math_sdp(True)
+        torch.backends.cuda.matmul.allow_tf32 = True
+    if torch.backends.cudnn.is_available():
+        torch.backends.cudnn.allow_tf32 = True
+        torch.backends.cudnn.benchmark = False
+        torch.backends.cudnn.deterministic = True
+    torch.use_deterministic_algorithms(False)
+
+    rank_seed = args.seed + accelerator.process_index
+    seed_everything(rank_seed)
+
     local_results = evaluate(accelerator=accelerator, args=args, video_save_dir=video_save_dir)
 
     # `accelerate.utils.gather_object` flattens one nesting level, so wrap payload in a list.
