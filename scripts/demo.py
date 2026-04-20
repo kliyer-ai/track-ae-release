@@ -5,6 +5,7 @@
 import glob
 import math
 import os
+import secrets
 import tempfile
 from dataclasses import dataclass, field
 from functools import partial
@@ -403,6 +404,14 @@ def predict(
     model = model_state.model
     g = torch.Generator(device="cuda")
     g.manual_seed(seed)
+    cfg_token = f"{float(cfg_scale):.3g}".replace("-", "m").replace(".", "p")
+    run_token = secrets.token_hex(4)
+    output_prefix = f"zipmo-{run_token}-seed-{int(seed)}-cfg-{cfg_token}"
+    output_dir = tempfile.mkdtemp(prefix=f"{output_prefix}-")
+
+    def sample_output_path(sample_idx: int, kind: str, suffix: str) -> str:
+        filename = f"{output_prefix}-sample-{sample_idx + 1:02d}-{kind}{suffix}"
+        return os.path.join(output_dir, filename)
 
     flatteneted_pokes = []
     for track in inputs.all_tracks:
@@ -480,12 +489,7 @@ def predict(
         w=grid_w,
     )
     for sample_idx in range(batch_size):
-        tmp_latents = tempfile.NamedTemporaryFile(
-            prefix=f"sample-{sample_idx + 1}-latent-grid-",
-            suffix=".pt",
-            delete=False,
-        )
-        tmp_latents.close()
+        latent_path = sample_output_path(sample_idx, "latent-grid", ".pt")
         torch.save(
             {
                 "latent_grid": latent_grid[sample_idx],
@@ -496,9 +500,9 @@ def predict(
                 "cfg_scale": cfg_scale,
                 "n_decoder_tracks": n_decoder_tracks,
             },
-            tmp_latents.name,
+            latent_path,
         )
-        latent_download_paths[sample_idx] = tmp_latents.name
+        latent_download_paths[sample_idx] = latent_path
 
     H, W, C = inputs.image.shape
 
@@ -509,7 +513,7 @@ def predict(
     video_paths = []
     out_frames = []
 
-    for pred_track in pred_tracks:
+    for sample_idx, pred_track in enumerate(pred_tracks):
         out_frame = draw_trajectories_on_frame(
             torch.from_numpy(inputs.image) / 255.0,
             pred_track[:n_vis_tracks].cpu(),
@@ -522,10 +526,9 @@ def predict(
                 pred_track[:n_vis_tracks].cpu(),
                 motion_threshold=motion_threshold,
             )
-            tmp_video = tempfile.NamedTemporaryFile(suffix=".mp4", delete=False)
-            tmp_video.close()
-            imageio.mimwrite(tmp_video.name, track_video_frames, format="mp4", fps=track_video_fps)
-            video_paths.append(tmp_video.name)
+            video_path = sample_output_path(sample_idx, "prediction", ".mp4")
+            imageio.mimwrite(video_path, track_video_frames, format="mp4", fps=track_video_fps)
+            video_paths.append(video_path)
 
     if render_videos and decode_grid:
         H = W = int(math.sqrt(n_decoder_tracks))
@@ -551,10 +554,10 @@ def predict(
         flow_video = flow_to_image(flow.float())
         flow_video = resize(flow_video, size=[256, 256])
 
-        tmpfile = tempfile.NamedTemporaryFile(suffix=".mp4", delete=False)
-        imageio.mimwrite(tmpfile.name, flow_video.movedim(1, -1).cpu().numpy(), format="mp4", fps=15)
+        flow_video_path = os.path.join(output_dir, f"{output_prefix}-decode-grid-flow.mp4")
+        imageio.mimwrite(flow_video_path, flow_video.movedim(1, -1).cpu().numpy(), format="mp4", fps=15)
 
-        video_paths = [tmpfile.name]
+        video_paths = [flow_video_path]
 
     # Ensure stable number of file outputs in the UI.
     video_paths = (video_paths + [None] * 4)[:4]
