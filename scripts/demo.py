@@ -494,6 +494,8 @@ def predict(
             {
                 "latent_grid": latent_grid[sample_idx],
                 "latent_grid_denormalized": denormalized_latent_grid[sample_idx],
+                "track_conds": track_conds.detach().float().cpu(),
+                "track_conds_format": "start_y, start_x, end_y, end_x, end_t; spatial coordinates are normalized to [-1, 1]",
                 "grid_size": model.grid_size,
                 "sample_index": sample_idx,
                 "seed": seed,
