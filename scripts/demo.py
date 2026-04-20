@@ -392,7 +392,7 @@ def predict(
     seed: int = 42,
     render_videos: bool = False,
     motion_threshold: float = 1.0,
-) -> tuple[UInt8[np.ndarray, "h w c"], None]:
+) -> list:
     assert inputs.image is not None, "Image input is required for prediction."
 
     batch_size = 4
@@ -436,16 +436,69 @@ def predict(
         dim=0,
     )
 
+    start_frame = torch.from_numpy(inputs.image).to(device).expand(batch_size, -1, -1, -1).float() / 127.5 - 1.0
+
     with torch.autocast(device_type="cuda", dtype=dtype):
         model.cfg_scale = cfg_scale
-        pred_tracks = model.sample(
+        sampled_latents = model.sample(
             z=torch.randn(batch_size, *VAL_SHAPE, device=device, dtype=dtype, generator=g),
             points_per_traj=64,
             query_pos=query_points.expand(batch_size, -1, -1) * 2 - 1,
-            start_frame=torch.from_numpy(inputs.image).to(device).expand(batch_size, -1, -1, -1).float() / 127.5 - 1.0,
+            start_frame=start_frame,
             track_conds=track_conds.expand(batch_size, -1, -1),  # (batch_size, n_pokes, 5)
-            decode_dense=decode_dense,
+            decode_latent=False,
         )
+        decode_latents = model.denormalize_latents(sampled_latents)
+        if decode_dense:
+            pred_tracks = model.vae.decode_dense(
+                latents=decode_latents,
+                points_per_track=64,
+                start_frame=start_frame,
+            )
+        else:
+            pred_tracks = model.vae.decode(
+                latents=decode_latents,
+                query_pos=query_points.expand(batch_size, -1, -1) * 2 - 1,
+                points_per_track=64,
+                start_frame=start_frame,
+    )
+
+    latent_download_paths = [None] * batch_size
+    grid_t, grid_h, grid_w = model.grid_size
+    latent_grid = einops.rearrange(
+        sampled_latents.detach().float().cpu(),
+        "b (t h w) c -> b t h w c",
+        t=grid_t,
+        h=grid_h,
+        w=grid_w,
+    )
+    denormalized_latent_grid = einops.rearrange(
+        decode_latents.detach().float().cpu(),
+        "b (t h w) c -> b t h w c",
+        t=grid_t,
+        h=grid_h,
+        w=grid_w,
+    )
+    for sample_idx in range(batch_size):
+        tmp_latents = tempfile.NamedTemporaryFile(
+            prefix=f"sample-{sample_idx + 1}-latent-grid-",
+            suffix=".pt",
+            delete=False,
+        )
+        tmp_latents.close()
+        torch.save(
+            {
+                "latent_grid": latent_grid[sample_idx],
+                "latent_grid_denormalized": denormalized_latent_grid[sample_idx],
+                "grid_size": model.grid_size,
+                "sample_index": sample_idx,
+                "seed": seed,
+                "cfg_scale": cfg_scale,
+                "n_decoder_tracks": n_decoder_tracks,
+            },
+            tmp_latents.name,
+        )
+        latent_download_paths[sample_idx] = tmp_latents.name
 
     H, W, C = inputs.image.shape
 
@@ -505,7 +558,7 @@ def predict(
 
     # Ensure stable number of file outputs in the UI.
     video_paths = (video_paths + [None] * 4)[:4]
-    return [np.concatenate(out_frames, axis=1), *video_paths]
+    return [np.concatenate(out_frames, axis=1), *video_paths, *latent_download_paths]
 
 
 def load_video(
@@ -649,6 +702,10 @@ def demo(
                 with gr.Row():
                     video_outputs_sep = [gr.Video(label=f"Prediction {i + 1}", format="mp4") for i in range(4)]
 
+                with gr.Row():
+                    latent_download_outputs = [
+                        gr.File(label=f"Sample {sample_idx + 1} Latent Grid") for sample_idx in range(4)
+                    ]
                 predict_button = gr.Button("Predict", variant="primary")
 
                 with gr.Accordion("Advanced Settings"):
@@ -680,6 +737,7 @@ def demo(
                     outputs=[
                         image_output,
                         *video_outputs_sep,
+                        *latent_download_outputs,
                     ],
                     show_progress=True,
                 )
