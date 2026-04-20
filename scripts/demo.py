@@ -426,6 +426,7 @@ def predict(
             end = [c * 2 - 1 for c in end]
             flatteneted_pokes.append([start[1], start[0], end[1], end[0], (i + 1) / n_end])  # end_t in [0, 1]
 
+    print("Flattened pokes:", flatteneted_pokes, flush=True)
     if len(flatteneted_pokes) > 0:
         track_conds = torch.tensor(flatteneted_pokes, device=device, dtype=dtype)  # (n_pokes, 5)
     else:
@@ -470,7 +471,7 @@ def predict(
                 query_pos=query_points.expand(batch_size, -1, -1) * 2 - 1,
                 points_per_track=64,
                 start_frame=start_frame,
-    )
+            )
 
     latent_download_paths = [None] * batch_size
     grid_t, grid_h, grid_w = model.grid_size
@@ -496,6 +497,7 @@ def predict(
                 "latent_grid_denormalized": denormalized_latent_grid[sample_idx],
                 "track_conds": track_conds.detach().float().cpu(),
                 "track_conds_format": "start_y, start_x, end_y, end_x, end_t; spatial coordinates are normalized to [-1, 1]",
+                "start_frame": start_frame[sample_idx].detach().float().cpu(),
                 "grid_size": model.grid_size,
                 "sample_index": sample_idx,
                 "seed": seed,
@@ -611,7 +613,14 @@ def demo(
     with gr.Blocks() as demo:
         gr.Markdown("## Motion Spaces Demo")
 
-        model: ZipMoPlanner = torch.hub.load("kliyer-ai/track-ae-release", "zipmo_planner_sparse")  # type: ignore
+        repo = "CompVis/long-term-motion"
+        model: ZipMoPlanner = torch.hub.load(repo, "zipmo_planner_sparse", force_reload=True)
+        # type: ignore
+        # vae = ZipMoVAE()
+        # model = ZipMoPlanner(n_cond=16, n_points_per_track=8, vae=vae, poisson_rate=2.5)
+        # model.load_state_dict(
+        #     torch.load("/export/home/ra49veb/dev/track-ae-release/checkpoints/track_gen_dynamic_ema.pt")
+        # )
         model.eval()
         model.to(device)
         model.requires_grad_(False)
