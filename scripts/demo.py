@@ -28,6 +28,7 @@ from zipmo.planner import ZipMoPlanner
 from zipmo.rope import make_axial_pos_2d
 
 VAL_SHAPE = [256, 16]
+VIDEO_FPS = 24
 
 
 def draw_trajectories_on_frame(
@@ -489,6 +490,8 @@ def predict(
         h=grid_h,
         w=grid_w,
     )
+    # denormalized_latent_grid = decode_latents.detach().float().cpu()
+
     for sample_idx in range(batch_size):
         latent_path = sample_output_path(sample_idx, "latent-grid", ".pt")
         torch.save(
@@ -531,7 +534,7 @@ def predict(
                 motion_threshold=motion_threshold,
             )
             video_path = sample_output_path(sample_idx, "prediction", ".mp4")
-            imageio.mimwrite(video_path, track_video_frames, format="mp4", fps=track_video_fps)
+            imageio.mimwrite(video_path, track_video_frames, format="mp4", fps=VIDEO_FPS)
             video_paths.append(video_path)
 
     if render_videos and decode_grid:
@@ -559,7 +562,7 @@ def predict(
         flow_video = resize(flow_video, size=[256, 256])
 
         flow_video_path = os.path.join(output_dir, f"{output_prefix}-decode-grid-flow.mp4")
-        imageio.mimwrite(flow_video_path, flow_video.movedim(1, -1).cpu().numpy(), format="mp4", fps=15)
+        imageio.mimwrite(flow_video_path, flow_video.movedim(1, -1).cpu().numpy(), format="mp4", fps=VIDEO_FPS)
 
         video_paths = [flow_video_path]
 
