@@ -81,6 +81,7 @@ class ZipMoPlanner(nn.Module):
         d_cond_norm: int = 256,
         vae_shift: float = -0.175,
         vae_scale: float = 11.6,
+        n_points_per_track: int = 1,
     ):
         super().__init__()
 
@@ -93,7 +94,8 @@ class ZipMoPlanner(nn.Module):
 
         self.grid_size = (1, 16, 16)
         self.latent_dim = 16
-        self.n_cond = n_cond
+        self.n_points_per_track = n_points_per_track
+        self.n_cond = n_cond * n_points_per_track
         self.poisson_rate = float(poisson_rate) if poisson_rate is not None else None
         self.cfg_scale = float(1)
 
@@ -222,9 +224,9 @@ class ZipMoPlanner(nn.Module):
                 dim=1,
             )
 
-        assert (
-            track_cond_emb.shape[1] == self.n_cond
-        ), f"Expected track_cond_emb with {self.n_cond} tokens, got {track_cond_emb.shape[1]}"
+        assert track_cond_emb.shape[1] == self.n_cond, (
+            f"Expected track_cond_emb with {self.n_cond} tokens, got {track_cond_emb.shape[1]}"
+        )
 
         return {
             "extra_tokens": start_embed,
